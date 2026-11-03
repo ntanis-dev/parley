@@ -57,9 +57,10 @@ export const isBusy = (session, now = Date.now()) =>
   Boolean(session?.busySince) && now - session.busySince < TURN_STALE_MS;
 
 // The turn running now was started by Parley waking the session, and the
-// person has not written since.
+// person has not written since. A wake in the same millisecond as the
+// person's prompt counts as the peer's: when unsure, the turn may only read.
 export const isPeerTurn = (session) =>
-  Boolean(session?.peerAt) && session.peerAt > (session.humanAt ?? 0);
+  Boolean(session?.peerAt) && session.peerAt >= (session.humanAt ?? 0);
 
 // Waking a session costs a turn, so it is spaced out and capped: at most
 // WAKES_PER_HOUR wakes since the person last wrote, at least WAKE_GAP_MS

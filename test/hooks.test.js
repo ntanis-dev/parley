@@ -37,7 +37,7 @@ function setup(t, { room = true } = {}) {
     saveRoom(paths, r);
     bindProject(paths, root, r.roomId);
   }
-  const hook = (event, input = {}) =>
+  const hook = (event, input = {}, now = Date.now()) =>
     handleHook(
       event,
       {
@@ -46,7 +46,7 @@ function setup(t, { room = true } = {}) {
         permission_mode: "default",
         ...input,
       },
-      { paths, launchId: "launch-1234" },
+      { paths, launchId: "launch-1234", now },
     );
   return { paths, root, hook };
 }
@@ -140,7 +140,8 @@ test("a turn a member's message started may only read", (t) => {
     "mcp__parley__send",
   ])
     assert.equal(hook("pre-tool-use", { tool_name: tool }), null, tool);
-  hook("user-prompt", { prompt: "go ahead and fix it" });
+  // The person writes after the wake (a later millisecond, for certain).
+  hook("user-prompt", { prompt: "go ahead and fix it" }, Date.now() + 1000);
   assert.equal(hook("pre-tool-use", { tool_name: "Edit" }), null);
 });
 

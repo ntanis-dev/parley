@@ -87,11 +87,11 @@ export function client(
   };
 }
 
-const hook = (p, launchId, event, input) =>
+const hook = (p, launchId, event, input, now = Date.now()) =>
   handleHook(
     event,
     { cwd: p.project, permission_mode: "default", ...input },
-    { paths: p.paths, launchId },
+    { paths: p.paths, launchId, now },
   );
 
 test(
@@ -205,10 +205,13 @@ test(
       tool_name: "Edit",
     });
     assert.equal(denied.hookSpecificOutput.permissionDecision, "deny");
-    hook(bob, "launch-Bob", "user-prompt", {
-      session_id: sid,
-      prompt: "ok, update our side",
-    });
+    hook(
+      bob,
+      "launch-Bob",
+      "user-prompt",
+      { session_id: sid, prompt: "ok, update our side" },
+      Date.now() + 1000,
+    );
     assert.equal(
       hook(bob, "launch-Bob", "pre-tool-use", {
         session_id: sid,
