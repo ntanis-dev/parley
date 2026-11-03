@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
+  <title id="title">Parley</title>
+  <desc id="desc">Your Claude Code and theirs, talking on one project. Two terminal windows face each other across the dark, a sealed envelope with a padlock travelling between them along a dashed line, and beside them a terminal where parley on connects a conversation to its room.</desc>
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#11151b"/>
+      <stop offset="1" stop-color="#151b24"/>
+    </linearGradient>
+    <radialGradient id="glow" gradientUnits="userSpaceOnUse" cx="250" cy="180" r="230">
+      <stop offset="0" stop-color="#79b8ff" stop-opacity="0.32"/>
+      <stop offset="0.45" stop-color="#5a8fd6" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#5a8fd6" stop-opacity="0"/>
+    </radialGradient>
+    <g id="win">
+      <rect x="0" y="0" width="168" height="120" rx="10" fill="#1a1f27" stroke="#3a4554" stroke-width="2"/>
+      <path d="M1 26 H167" stroke="#2c343f" stroke-width="1.5"/>
+      <circle cx="16" cy="13" r="4" fill="#79b8ff"/><circle cx="30" cy="13" r="4" fill="#343c47"/><circle cx="44" cy="13" r="4" fill="#343c47"/>
+      <rect x="16" y="44" width="96" height="7" rx="3.5" fill="#2a323d"/>
+      <rect x="16" y="60" width="132" height="7" rx="3.5" fill="#2a323d"/>
+      <rect x="16" y="76" width="72" height="7" rx="3.5" fill="#2a323d"/>
+      <rect x="16" y="94" width="8" height="14" fill="#79b8ff"/>
+    </g>
+  </defs>
+  <rect x="0.5" y="0.5" width="1199" height="359" rx="16" fill="url(#sky)" stroke="#2f3946"/>
+  <rect x="0" y="0" width="520" height="360" fill="url(#glow)"/>
+
+  <use href="#win" x="52" y="62"/>
+  <use href="#win" x="282" y="178"/>
+  <text x="74" y="214" font-family="ui-monospace, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" fill="#8b949e">you</text>
+  <text x="402" y="330" font-family="ui-monospace, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" fill="#8b949e">alex</text>
+
+  <path d="M222 122 C 300 116, 330 150, 340 172" fill="none" stroke="#79b8ff" stroke-width="2" stroke-dasharray="5 7" stroke-linecap="round" opacity="0.75"/>
+  <path d="M276 236 C 200 244, 170 214, 160 186" fill="none" stroke="#79b8ff" stroke-width="2" stroke-dasharray="5 7" stroke-linecap="round" opacity="0.4"/>
+
+  <g transform="translate(262 112) rotate(-6)">
+    <rect x="0" y="0" width="58" height="40" rx="5" fill="#e6edf3" stroke="#79b8ff" stroke-width="2"/>
+    <path d="M2 4 L29 24 L56 4" fill="none" stroke="#9aa7b4" stroke-width="2" stroke-linejoin="round"/>
+    <rect x="35" y="22" width="20" height="16" rx="3" fill="#2b5a91"/>
+    <path d="M39 22 V17 a6 6 0 0 1 12 0 V22" fill="none" stroke="#2b5a91" stroke-width="3"/>
+    <circle cx="45" cy="30" r="2.4" fill="#e6edf3"/>
+  </g>
+
+  <text x="560" y="150" font-family="system-ui, -apple-system, 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="76" font-weight="700" fill="#f0f4f8" letter-spacing="2">Parley</text>
+  <text x="562" y="198" font-family="system-ui, -apple-system, 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="25" fill="#d6e2ee">Your Claude Code and theirs, talking on one project.</text>
+  <g font-family="ui-monospace, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="17">
+    <text x="562" y="282" fill="#c9d1d9"><tspan fill="#79b8ff">&#x203a;</tspan> parley on</text>
+    <text x="562" y="310" fill="#8b949e">Room "shop" with Alex. Nothing leaves without your yes.</text>
+    <rect x="672" y="268" width="9" height="17" fill="#79b8ff"/>
+  </g>
+</svg>

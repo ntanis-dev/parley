@@ -1,0 +1,35 @@
+{
+  "name": "parley",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "author": "https://github.com/ntanis-dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ntanis-dev/parley.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ntanis-dev/parley/issues"
+  },
+  "homepage": "https://github.com/ntanis-dev/parley#readme",
+  "description": "Claude Code sessions of different people on one project, talking to each other: end-to-end encrypted, on only where you turn it on, nothing leaving without your approval.",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "bin": {
+    "parley": "src/cli.js"
+  },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "check": "node scripts/check.js",
+    "format": "prettier --write .",
+    "lint": "prettier --check ."
+  },
+  "devDependencies": {
+    "prettier": "3.9.9"
+  },
+  "dependencies": {
+    "ws": "8.22.0"
+  }
+}

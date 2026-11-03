@@ -1,0 +1,12 @@
+{
+  "name": "parley-relay-cloudflare",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "The Parley relay as a Cloudflare Worker with a Durable Object per room.",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  }
+}

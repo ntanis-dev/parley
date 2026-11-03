@@ -1,0 +1,6 @@
+{$PARLEY_DOMAIN} {
+	reverse_proxy relay:8787
+	log {
+		output discard
+	}
+}

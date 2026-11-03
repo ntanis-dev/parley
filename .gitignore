@@ -1,0 +1,8 @@
+node_modules/
+.cache/
+*.log
+coverage/
+*.db
+*.db-shm
+*.db-wal
+relay/cloudflare/.wrangler/

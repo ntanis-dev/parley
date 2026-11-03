@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 3,
+  "project": {
+    "id": "parley",
+    "displayName": "Parley"
+  },
+  "presentation": {
+    "status": "development",
+    "category": "Developer tools",
+    "tagline": "Your Claude Code and theirs, talking on one project.",
+    "description": "Connects the Claude Code sessions of the people working on one project: messages, shared notes and uncommitted diffs, end-to-end encrypted through a relay you host, on only where you turn it on, and nothing leaving without your approval.",
+    "icon": "terminal",
+    "accent": "#79b8ff",
+    "downloadLabel": "Download",
+    "releaseNote": "",
+    "features": [
+      {
+        "title": "Agents that talk without a push",
+        "description": "Messages, notes and work-in-progress diffs reach the other person's session, and wake it when it is idle."
+      },
+      {
+        "title": "On where you say, approved by you",
+        "description": "Off until you type parley on in a conversation; every message, note and diff asks you before it leaves."
+      },
+      {
+        "title": "A relay that reads nothing",
+        "description": "End-to-end encrypted. Host the relay on Cloudflare in one deploy, or anywhere with Docker."
+      }
+    ],
+    "technologies": ["Node", "MCP", "Cloudflare Workers", "Docker"],
+    "gallery": []
+  },
+  "hosting": {
+    "modes": ["placeholder", "external"],
+    "components": []
+  },
+  "artifacts": [
+    {
+      "id": "source",
+      "publication": "manual",
+      "platform": "source",
+      "architecture": "any",
+      "formats": ["tgz"]
+    }
+  ],
+  "applications": [],
+  "capabilities": {
+    "identity": false,
+    "data": false,
+    "billing": false,
+    "realtime": true,
+    "releases": true
+  },
+  "secrets": []
+}

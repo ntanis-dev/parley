@@ -1,0 +1,27 @@
+name: Dependency Vulnerability Scan
+
+on:
+  # Pushes and pull requests scan when the lockfile changes; the weekly run catches advisories published since for
+  # dependencies that did not change.
+  pull_request:
+    branches: [main]
+    paths:
+      - "**/package-lock.json"
+      - "**/osv-scanner.toml"
+      - ".github/workflows/osv-scanner.yml"
+  push:
+    branches: [main]
+    paths:
+      - "**/package-lock.json"
+      - "**/osv-scanner.toml"
+      - ".github/workflows/osv-scanner.yml"
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    uses: ntanis-dev/ci/.github/workflows/dependency-scan.yml@c3b93e68f9698f2a349f18656c97efe645fba5fe

@@ -1,0 +1,13 @@
+{
+  // The Parley relay on Cloudflare Workers. Deploy with `npx wrangler deploy`
+  // from this folder, then set a relay key:
+  //   npx wrangler secret put PARLEY_RELAY_KEY
+  "name": "parley-relay",
+  "main": "worker.js",
+  "compatibility_date": "2026-10-01",
+  "durable_objects": {
+    "bindings": [{ "name": "ROOMS", "class_name": "Room" }],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }],
+  "observability": { "enabled": false },
+}
