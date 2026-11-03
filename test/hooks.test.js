@@ -210,6 +210,11 @@ test("a launch's settings run hooks without a shell and fence off ~/.parley", (t
     ],
     timeout: 10,
   });
+  // Only rule kinds Claude Code matches: Edit covers Write.
+  assert.deepEqual(
+    files.settings.permissions.deny.map((rule) => rule.replace(/\(.*/, "")),
+    ["Read", "Edit"],
+  );
   assert.ok(
     files.settings.permissions.deny.every((rule) =>
       /\.parley\/\*\*\)$/.test(rule),

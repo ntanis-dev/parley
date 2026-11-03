@@ -117,7 +117,9 @@ export function launchFiles({
       SessionEnd: [{ hooks: [hook("session-end")] }],
     },
     permissions: {
-      deny: [`Read(${own}/**)`, `Edit(${own}/**)`, `Write(${own}/**)`],
+      // Edit rules cover every file-editing tool (Write included); Claude
+      // Code does not match Write(...) rules at all.
+      deny: [`Read(${own}/**)`, `Edit(${own}/**)`],
     },
   };
   const mcp = installed
