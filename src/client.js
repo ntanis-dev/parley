@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { isIP } from "node:net";
+import { VERSION, WIRE } from "./version.js";
 
 // One connection to a room on a relay: hello, the backlog since the last
 // cursor, then live messages; posts wait for the relay's ack. It reconnects
@@ -52,7 +53,7 @@ function privateHost(hostname) {
   return a === 127 || (a === 100 && b >= 64 && b <= 127);
 }
 
-const FATAL = new Set(["auth", "relay-key", "bad-hello"]);
+const FATAL = new Set(["auth", "relay-key", "bad-hello", "version"]);
 
 export class RoomConnection {
   constructor({
@@ -76,6 +77,8 @@ export class RoomConnection {
     this.WebSocket = WebSocketImpl;
     this.pending = new Map();
     this.state = "idle";
+    this.helloV = WIRE.max;
+    this.relay = null;
     this.attempt = 0;
     this.stopped = false;
   }
@@ -121,7 +124,9 @@ export class RoomConnection {
       ws.send(
         JSON.stringify({
           t: "hello",
-          v: 1,
+          v: this.helloV,
+          vmin: WIRE.min,
+          app: VERSION,
           token: this.token,
           after: this.cursor,
           key: this.relayKey || undefined,
@@ -162,7 +167,16 @@ export class RoomConnection {
     switch (frame?.t) {
       case "ready":
         this.attempt = 0;
-        this.setState("connected", { created: Boolean(frame.created) });
+        // A relay from before 0.2 says nothing about itself.
+        this.relay =
+          frame.relay && typeof frame.relay.app === "string"
+            ? { app: frame.relay.app, wire: frame.relay.wire ?? null }
+            : { app: null, wire: { min: 1, max: 1 } };
+        this.wire = Number.isSafeInteger(frame.wire) ? frame.wire : 1;
+        this.setState("connected", {
+          created: Boolean(frame.created),
+          relay: this.relay,
+        });
         clearInterval(this.keepalive);
         this.keepalive = setInterval(() => this.send({ t: "ping" }), 25_000);
         return;
@@ -197,7 +211,17 @@ export class RoomConnection {
           clearTimeout(waiting.timer);
           this.pending.delete(frame.id);
           waiting.reject(error);
+        } else if (frame.code === "bad-hello" && this.helloV > WIRE.min) {
+          // A relay from before 0.2 knows only v 1: say hello again with
+          // the oldest version this client still speaks, right away.
+          this.helloV = WIRE.min;
+          this.attempt = 0;
+          try {
+            this.ws?.close(1000, "retry");
+          } catch {}
         } else if (FATAL.has(frame.code)) {
+          if (frame.code === "version" && frame.relay)
+            this.relay = { app: frame.relay.app, wire: frame.relay.wire };
           this.setState("refused", error.message);
         }
         return;

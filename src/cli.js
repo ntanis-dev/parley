@@ -4,6 +4,7 @@ import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { pathsFor } from "./paths.js";
+import { VERSION } from "./version.js";
 
 // parley: one command for the person, the hooks and the MCP server. The
 // commands that decide who is trusted (setup, create, join, approve, block,
@@ -15,15 +16,7 @@ const CLI_PATH = fileURLToPath(import.meta.url);
 export class UsageError extends Error {}
 export class Failure extends Error {}
 
-const version = () => {
-  try {
-    return JSON.parse(
-      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-    ).version;
-  } catch {
-    return "0.0.0";
-  }
-};
+const version = () => VERSION;
 
 function readStdin(limit = 4 << 20) {
   if (process.stdin.isTTY) return "";
@@ -147,7 +140,7 @@ const COMMANDS = {
     const root = await rootOf(cwd);
     const relay =
       values.relay || (await ask(io, "Relay address (wss://...): "));
-    const { room, invite } = await createRoom({
+    const { room, invite, checked } = await createRoom({
       paths,
       identity,
       root,
@@ -156,6 +149,10 @@ const COMMANDS = {
       name: values.name || root.split(/[\\/]/).pop(),
     });
     io.out(`Opened room "${room.name}" for ${root}.`);
+    if (!checked)
+      io.out(
+        "This folder has no commits yet, so Parley cannot check that the others join from the same project. Commit once and open the room again to have it checked.",
+      );
     io.out(
       `\nGive this invite to the people who should join, over a channel you trust (it lets them ask to join; you still approve each one):\n\n${invite}\n`,
     );
@@ -206,7 +203,7 @@ const COMMANDS = {
       `Joined "${room.name}". ${invite.by.name} now has to approve you; your fingerprint is ${fingerprint(identity.sign.pub, identity.box.pub)}.`,
     );
     io.out(
-      "Then start Claude Code with `parley` here and type `parley on` in the conversation.",
+      "Then start Claude Code with `parley` here and type `/parley on` in the conversation.",
     );
     return 0;
   },
@@ -318,8 +315,19 @@ const COMMANDS = {
     io.out(
       on.length
         ? `On in ${on.length} conversation${on.length === 1 ? "" : "s"}.`
-        : "Off in every conversation (type `parley on` in one).",
+        : "Off in every conversation (type `/parley on` in one).",
     );
+    const { memberVersions, notices } = await import("./compat.js");
+    const relay = room.versions?.relay;
+    const versions = [
+      `you ${VERSION}`,
+      `relay ${relay ? (relay.app ?? "older than 0.2.0") : "not seen yet"}`,
+      ...memberVersions(room).map(
+        (m) => `${m.name} ${m.app ?? "not reported (0.1 or older)"}`,
+      ),
+    ];
+    io.out(`Parley versions: ${versions.join(", ")}.`);
+    for (const line of notices(room)) io.out(line);
     return 0;
   },
 
@@ -333,6 +341,124 @@ const COMMANDS = {
       on.length
         ? `Turned Parley off in ${on.length} conversation${on.length === 1 ? "" : "s"}.`
         : "Parley was not on anywhere.",
+    );
+    return 0;
+  },
+
+  // Turning approvals on is always allowed; turning them off lets agents send
+  // on their own again, so it needs the person.
+  async approvals({ positionals, paths, io }) {
+    const { readConfig, writeConfig } = await import("./config.js");
+    const wanted = positionals[0]?.toLowerCase();
+    if (wanted !== undefined && wanted !== "on" && wanted !== "off")
+      throw new UsageError("parley approvals [on|off]");
+    if (wanted === "off" && readConfig(paths).approvals) {
+      if (
+        !(await yes(
+          io,
+          "Let your agents send messages, notes and diffs without asking you (still only through Parley's checks)?",
+        ))
+      )
+        return 1;
+    }
+    if (wanted) writeConfig(paths, (c) => (c.approvals = wanted === "on"));
+    io.out(
+      readConfig(paths).approvals
+        ? "Approvals are on: each message, note and diff your agent sends waits for your yes in a dialog."
+        : "Approvals are off: your agent talks to the room on its own, through Parley's checks (this project only, no secrets).",
+    );
+    return 0;
+  },
+
+  async install({ values, paths, io, env }) {
+    const { installedEntry, isCurrent, install, serverEntry } =
+      await import("./install.js");
+    const wanted = serverEntry({ cliPath: CLI_PATH });
+    const current = installedEntry({ env, home: paths.home });
+    if (values["dry-run"]) {
+      io.out(
+        isCurrent(current, wanted)
+          ? "Parley's MCP server is already in Claude Code's user configuration; nothing to do."
+          : `Would run: claude mcp add-json --scope user parley '${JSON.stringify(wanted)}'`,
+      );
+      return 0;
+    }
+    const { action } = install({ env, home: paths.home, cliPath: CLI_PATH });
+    io.out(
+      action === "same"
+        ? "Parley is installed already."
+        : `${action === "add" ? "Added" : "Updated"} Parley's MCP server in Claude Code's user configuration (claude mcp list shows it). It does nothing outside a \`parley\` launch; \`parley uninstall\` removes it.`,
+    );
+    return 0;
+  },
+
+  // Parley updates the way it was installed: a git checkout, pulled
+  // (fast-forward only) and its dependencies installed again.
+  async update({ paths, io, env }) {
+    const { spawnSync } = await import("node:child_process");
+    const { dirname } = await import("node:path");
+    const repo = dirname(dirname(CLI_PATH));
+    const git = (...args) =>
+      spawnSync("git", ["-C", repo, ...args], {
+        encoding: "utf8",
+        windowsHide: true,
+      });
+    if (git("rev-parse", "--is-inside-work-tree").stdout?.trim() !== "true")
+      throw new Failure(
+        `Parley in ${repo} is not a git checkout; update it the way you installed it.`,
+      );
+    if (git("status", "--porcelain", "--untracked-files=no").stdout.trim())
+      throw new Failure(
+        `Parley's folder (${repo}) has changes of its own; commit or stash them first.`,
+      );
+    const remote =
+      git("remote", "get-url", "origin").stdout?.trim() || "origin";
+    if (
+      !(await yes(
+        io,
+        `Update Parley ${VERSION} in ${repo} from ${remote} (git pull --ff-only, then npm install)?`,
+      ))
+    )
+      return 1;
+    const run = (command, args) =>
+      spawnSync(command, args, {
+        cwd: repo,
+        stdio: "inherit",
+        env,
+        // npm is a .cmd script on Windows, which needs a shell; the
+        // arguments are fixed.
+        shell: process.platform === "win32" && command === "npm",
+      });
+    if (run("git", ["pull", "--ff-only"]).status !== 0)
+      throw new Failure("git pull did not finish; see above.");
+    if (run("npm", ["install", "--no-audit", "--no-fund"]).status !== 0)
+      throw new Failure("npm install did not finish; see above.");
+    // The new code, asked in a process of its own.
+    const after = spawnSync(process.execPath, [CLI_PATH, "--version"], {
+      encoding: "utf8",
+      env,
+    }).stdout?.trim();
+    io.out(
+      after && after !== VERSION
+        ? `Updated Parley ${VERSION} to ${after}. Restart running \`parley\` sessions to use it.`
+        : `Parley ${VERSION} is the newest on ${remote}.`,
+    );
+    const { installedEntry } = await import("./install.js");
+    if (installedEntry({ env, home: paths.home }))
+      spawnSync(process.execPath, [CLI_PATH, "install"], {
+        stdio: "inherit",
+        env,
+      });
+    return 0;
+  },
+
+  async uninstall({ paths, io, env }) {
+    const { uninstall } = await import("./install.js");
+    const { action } = uninstall({ env, home: paths.home });
+    io.out(
+      action === "remove"
+        ? "Removed Parley's MCP server from Claude Code's user configuration. Your keys and rooms stay in ~/.parley."
+        : "Parley was not installed.",
     );
     return 0;
   },
@@ -443,6 +569,18 @@ const COMMANDS = {
       check(false, "Claude Code", error.message);
     }
     check(Boolean(loadIdentity(paths)), "Your keys", "run `parley setup`");
+    {
+      const { installedEntry, isCurrent, serverEntry } =
+        await import("./install.js");
+      const entry = installedEntry({ env, home: paths.home });
+      check(
+        isCurrent(entry, serverEntry({ cliPath: CLI_PATH })),
+        "Installed, so messages can wake a session",
+        entry
+          ? "it points at another copy of Parley; run `parley install` again"
+          : "run `parley install`",
+      );
+    }
     const project = projectFor(paths, cwd);
     const room = project && loadRoom(paths, project.roomId);
     check(
@@ -452,9 +590,11 @@ const COMMANDS = {
     );
     if (room && loadIdentity(paths)) {
       const { syncRoom } = await import("./ops.js");
+      const { notices } = await import("./compat.js");
       try {
-        await syncRoom(paths, loadIdentity(paths), room);
+        const fresh = await syncRoom(paths, loadIdentity(paths), room);
         check(true, `Relay ${room.relay}`);
+        for (const line of notices(fresh)) io.out(`note ${line}`);
       } catch (error) {
         check(false, `Relay ${room.relay}`, error.message);
       }
@@ -469,15 +609,27 @@ const COMMANDS = {
   // ---- Claude Code's callers ----------------------------------------------
 
   async hook({ positionals, values, paths, io }) {
+    const input = parseJson(readStdin());
     try {
       const { handleHook } = await import("./hooks.js");
-      const output = handleHook(positionals[0], parseJson(readStdin()), {
+      const output = handleHook(positionals[0], input, {
         paths,
         launchId: values.launch ?? null,
       });
       if (output) io.out(JSON.stringify(output));
-    } catch {
-      // A hook never fails the session.
+    } catch (error) {
+      // A hook never fails the session, but a toggle that went wrong still
+      // stays away from the model.
+      if (
+        positionals[0] === "user-prompt" &&
+        /^\s*\/?parley\s+(on|off|status)\b/i.test(input?.prompt ?? "")
+      )
+        io.out(
+          JSON.stringify({
+            decision: "block",
+            reason: `Parley could not do that: ${error?.message ?? error}`,
+          }),
+        );
     }
     return 0;
   },
@@ -486,7 +638,9 @@ const COMMANDS = {
     const { runMcp } = await import("./mcp.js");
     runMcp({
       paths,
-      launchId: values.launch ?? null,
+      // The launch passes its id on the command line (--mcp-config) or, to
+      // the installed server, in the environment.
+      launchId: values.launch ?? env.PARLEY_LAUNCH ?? null,
       env: { ...env, PARLEY_VERSION: version() },
     });
     return new Promise(() => {});
@@ -518,6 +672,7 @@ const OPTIONS = {
   join: { "relay-key": { type: "string" } },
   status: { offline: { type: "boolean" } },
   log: { count: { type: "string", short: "n" } },
+  install: { "dry-run": { type: "boolean" } },
   relay: {
     host: { type: "string" },
     port: { type: "string" },
@@ -530,13 +685,14 @@ const OPTIONS = {
   mcp: { launch: { type: "string" } },
 };
 
-const HELP = `parley ${version()}: Claude Code sessions on one project, talking to each other.
+const HELP = `parley ${version()}: keep each other's agents in the loop.
 
 Start
-  parley [claude arguments]   Claude Code with Parley loaded; type \`parley on\` in a conversation
+  parley [claude arguments]   Claude Code with Parley loaded; type \`/parley on\` in a conversation
   parley start [arguments]    the same, for arguments that look like a command ("parley start fix it")
 
 Set up (each needs you at a terminal)
+  parley install              let Claude Code wake a session for new messages (once)
   parley setup [--name N]     your keys and the name members see
   parley create --relay URL   open a room for this project and print its invite
   parley join <invite>        join a room from an invite
@@ -544,18 +700,21 @@ Set up (each needs you at a terminal)
   parley block <who>          stop writing to and reading from a member
   parley invite               print this room's invite again
   parley leave                take this folder out of its room
+  parley uninstall            undo parley install
 
 Everyday
   parley status               you, this folder's room, its members, where Parley is on
   parley log [-n 20]          the latest messages, notes and diffs
   parley off                  turn Parley off in every conversation
+  parley approvals [on|off]   ask you before each message, note and diff your agent sends (off by default)
   parley doctor               check the setup
+  parley update               update Parley (git pull, npm install)
 
 Host a relay
   parley relay [--host H] [--port P] [--data FILE] [--tls-cert C --tls-key K]
                               PARLEY_RELAY_KEY limits who can open rooms
 
-In a conversation: \`parley on\`, \`parley off\`, \`parley status\`.`;
+In a conversation: \`/parley on\`, \`/parley off\`, \`/parley status\`.`;
 
 export async function main(
   argv = process.argv.slice(2),
@@ -615,6 +774,7 @@ const PLAIN_ERRORS = new Set([
   "CryptoError",
   "LaunchRefused",
   "ClaudeNotFound",
+  "InstallError",
 ]);
 const isUsage = (error) =>
   error instanceof UsageError ||

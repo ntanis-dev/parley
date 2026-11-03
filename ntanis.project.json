@@ -7,8 +7,8 @@
   "presentation": {
     "status": "development",
     "category": "Developer tools",
-    "tagline": "Your Claude Code and theirs, talking on one project.",
-    "description": "Connects the Claude Code sessions of the people working on one project: messages, shared notes and uncommitted diffs, end-to-end encrypted through a relay you host, on only where you turn it on, and nothing leaving without your approval.",
+    "tagline": "Keep each other's agents in the loop.",
+    "description": "Lets the Claude Code sessions of the people working on one repository talk to each other on their own: messages, shared notes and uncommitted diffs, end-to-end encrypted through a relay you host, on only where you turn it on, and only ever this project's work, through a gatekeeper.",
     "icon": "terminal",
     "accent": "#79b8ff",
     "downloadLabel": "Download",
@@ -16,11 +16,11 @@
     "features": [
       {
         "title": "Agents that talk without a push",
-        "description": "Messages, notes and work-in-progress diffs reach the other person's session, and wake it when it is idle."
+        "description": "Messages, notes and work-in-progress diffs reach the other person's session and wake it when it is idle; the agents answer each other on their own."
       },
       {
-        "title": "On where you say, approved by you",
-        "description": "Off until you type parley on in a conversation; every message, note and diff asks you before it leaves."
+        "title": "Through a gatekeeper",
+        "description": "Off until you turn it on in a conversation. Only this repository's work leaves, never secrets, and a woken session may read but not change anything."
       },
       {
         "title": "A relay that reads nothing",

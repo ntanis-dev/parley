@@ -5,13 +5,21 @@
 // it learns sizes and times, and nothing else.
 //
 // Wire protocol, JSON text frames on a WebSocket at /v1/rooms/<room id>:
-//   client: { t: "hello", v: 1, token, after, key? }   first, within 10 s
+//   client: { t: "hello", v, vmin, app, token, after, key? }   first, in 10 s
 //           { t: "post", id, blob }   { t: "sync", after }   { t: "ping" }
-//   relay:  { t: "ready", cursor, created }   { t: "msg", c, at, blob }
-//           { t: "ack", id, c, at }   { t: "synced", cursor, more }
-//           { t: "pong" }   { t: "error", code, message }  (then it closes)
+//   relay:  { t: "ready", cursor, created, wire, relay: { app, wire } }
+//           { t: "msg", c, at, blob }   { t: "ack", id, c, at }
+//           { t: "synced", cursor, more }   { t: "pong" }
+//           { t: "error", code, message }  (it closes after a bad hello)
+// v and vmin are the wire versions the client speaks (version.js); the
+// relay answers with the highest both speak, or an error with code
+// "version" saying which side is behind. A frame the relay does not know
+// gets an "unknown-frame" error and the connection stays open, so newer
+// clients can try newer frames.
 // A room is created by the first hello that reaches it; from then on only
 // that token opens it. A host can require a relay key to create rooms.
+
+import { VERSION, WIRE, shared } from "../version.js";
 
 export const LIMITS = {
   // One sealed message: a 256 KiB diff, sealed twice, in base64url.
@@ -231,10 +239,30 @@ export async function onFrame(
   if (!state.authed) {
     if (
       frame.t !== "hello" ||
-      frame.v !== 1 ||
+      !Number.isSafeInteger(frame.v) ||
       !TOKEN_RE.test(frame.token ?? "")
     )
       return refuse(conn, "bad-hello", "Say hello first.");
+    // The client speaks frame.v at most and frame.vmin at least (only v 1
+    // before 0.2). Refuse only when nothing is shared, saying who is behind.
+    const client = {
+      min: Number.isSafeInteger(frame.vmin) ? frame.vmin : frame.v,
+      max: frame.v,
+    };
+    const wire = shared(client, WIRE);
+    if (wire === null) {
+      conn.send({
+        t: "error",
+        code: "version",
+        relay: { app: VERSION, wire: WIRE },
+        message:
+          client.max < WIRE.min
+            ? `This relay runs Parley ${VERSION} and needs a newer Parley than yours.`
+            : `This relay runs Parley ${VERSION}, older than your Parley; its host needs to update it.`,
+      });
+      return conn.close(CLOSE.policy, "version");
+    }
+    state.wire = wire;
     // Every hash first: from here to the end of the hello nothing awaits, so
     // two hellos for a new room cannot both create it.
     const tokenHash = await sha256Hex(`parley-relay-token|${frame.token}`);
@@ -271,7 +299,13 @@ export async function onFrame(
     state.authed = true;
     store.prune(state.roomId, now);
     store.touch(state.roomId, now);
-    conn.send({ t: "ready", cursor: store.cursor(state.roomId), created });
+    conn.send({
+      t: "ready",
+      cursor: store.cursor(state.roomId),
+      created,
+      wire,
+      relay: { app: VERSION, wire: WIRE },
+    });
     const after =
       Number.isSafeInteger(frame.after) && frame.after > 0 ? frame.after : 0;
     return sendBatch(conn, store, after);
@@ -315,10 +349,12 @@ export async function onFrame(
       return;
     }
     default:
-      return refuse(
-        conn,
-        "bad-frame",
-        `Unknown frame ${String(frame.t).slice(0, 20)}.`,
-      );
+      // A newer client's frame: say so, and stay connected.
+      return conn.send({
+        t: "error",
+        code: "unknown-frame",
+        frame: String(frame.t).slice(0, 20),
+        message: `This relay (Parley ${VERSION}) does not know that frame.`,
+      });
   }
 }

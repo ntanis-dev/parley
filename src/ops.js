@@ -9,6 +9,13 @@ import {
 } from "./crypto.js";
 import { roomDir } from "./paths.js";
 import {
+  markAnnounced,
+  presenceBody,
+  presenceDue,
+  recordRelay,
+} from "./compat.js";
+import { projectMismatch, projectRoots, tagRoots } from "./project.js";
+import {
   RoomError,
   addMember,
   bindProject,
@@ -77,9 +84,29 @@ export async function withRoom(
   });
   try {
     await ready;
+    await afterConnect(paths, identity, room.roomId, conn);
     return await fn(conn);
   } finally {
     conn.stop();
+  }
+}
+
+// Once connected: note the relay's version, and tell the room this person's
+// when it is news (presence). Both only for a room already saved here; a
+// room being created or joined does it on its next connection.
+export async function afterConnect(paths, identity, roomId, conn) {
+  if (!loadRoom(paths, roomId)) return;
+  const room = updateRoom(paths, roomId, (fresh) => {
+    recordRelay(fresh, conn.relay);
+    return fresh;
+  });
+  if (!presenceDue(room)) return;
+  try {
+    const { blob } = prepare(identity, room, "presence", presenceBody());
+    await conn.post(blob);
+    updateRoom(paths, roomId, (fresh) => markAnnounced(fresh));
+  } catch {
+    // Said next time.
   }
 }
 
@@ -96,6 +123,7 @@ export const inviteFor = (room, identity) =>
     secret: Buffer.from(room.secret, "base64url"),
     room: room.name,
     by: { name: identity.name, sign: identity.sign.pub, box: identity.box.pub },
+    tags: room.tags ?? [],
   });
 
 function freeFolder(paths, root) {
@@ -117,18 +145,31 @@ export async function createRoom({
   name,
 }) {
   freeFolder(paths, root);
+  // The room remembers which repository it is for, so a member cannot join
+  // it from another one by mistake.
+  const project = projectRoots(root);
+  if (project.shallow)
+    throw new RoomError(
+      "This is a shallow clone, so its first commit is not the project's. Run `git fetch --unshallow` here first.",
+    );
+  const secret = newRoomSecret();
   const room = newRoom({
-    secret: newRoomSecret(),
+    secret,
     relay: relayUrl(relay),
     relayKey,
     name,
     root,
+    tags: tagRoots(secret, project.roots),
   });
   // The first hello opens the room on the relay (and checks the relay key).
   await withRoom(paths, identity, room);
   saveRoom(paths, room);
   bindProject(paths, root, room.roomId);
-  return { room, invite: inviteFor(room, identity) };
+  return {
+    room,
+    invite: inviteFor(room, identity),
+    checked: room.tags.length > 0,
+  };
 }
 
 export function readInvite(code, identity) {
@@ -158,12 +199,19 @@ export async function joinRoom({
     throw new RoomError(
       `You are already in this room, from ${existing.project}.`,
     );
+  const mismatch = projectMismatch(root, {
+    tags: invite.tags,
+    secret: invite.secret,
+    who: invite.by.name,
+  });
+  if (mismatch) throw new RoomError(mismatch);
   const room = newRoom({
     secret: invite.secret,
     relay: relayUrl(invite.relay),
     relayKey,
     name: invite.room,
     root,
+    tags: invite.tags,
   });
   addMember(room, invite.by, "approved", "invite");
   await announce(paths, identity, room);

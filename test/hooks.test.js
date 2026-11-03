@@ -16,7 +16,8 @@ import {
   recordWake,
   updateSession,
 } from "../src/sessions.js";
-import { checkArgs, launchFiles, rulePath } from "../src/launch.js";
+import { checkArgs, claudeArgs, launchFiles, rulePath } from "../src/launch.js";
+import { ParleyServer } from "../src/mcp.js";
 import { tempHome } from "./helpers.js";
 
 const SID = "11111111-aaaa";
@@ -228,4 +229,72 @@ test("permission rule paths use Claude Code's forms", () => {
   if (process.platform === "win32")
     assert.equal(rulePath("D:\\data\\.parley", home), "//d/data/.parley");
   else assert.equal(rulePath("/srv/.parley", home), "//srv/.parley");
+});
+
+test("the /parley command toggles like the plain prompt", (t) => {
+  const { paths, hook } = setup(t);
+  assert.equal(hook("user-prompt", { prompt: "/parley on" }).decision, "block");
+  assert.equal(readSession(paths, SID).enabled, true);
+  assert.match(
+    hook("user-prompt", { prompt: "/parley:parley status" }).reason,
+    /Parley is on/,
+  );
+  hook("user-prompt", { prompt: "/parley off" });
+  assert.equal(readSession(paths, SID).enabled, false);
+});
+
+test("a launch brings the /parley plugin, and the MCP server only before install", (t) => {
+  const { paths } = setup(t);
+  const before = launchFiles({
+    paths,
+    launchId: "launch-1234",
+    cliPath: "/p/cli.js",
+  });
+  const after = launchFiles({
+    paths,
+    launchId: "launch-1234",
+    cliPath: "/p/cli.js",
+    installed: true,
+  });
+  const argsBefore = claudeArgs(before, ["--resume"]);
+  const argsAfter = claudeArgs(after, ["--resume"]);
+  assert.ok(argsBefore.includes("--mcp-config"));
+  assert.ok(!argsAfter.includes("--mcp-config"));
+  for (const args of [argsBefore, argsAfter]) {
+    assert.equal(args[args.indexOf("--plugin-dir") + 1], before.pluginDir);
+    assert.deepEqual(
+      args.slice(-3),
+      [
+        "--dangerously-load-development-channels",
+        "server:parley",
+        "--resume",
+      ].slice(-3),
+    );
+  }
+  const command = Object.entries(after.pluginFiles).find(([file]) =>
+    file.endsWith("parley.md"),
+  )[1];
+  assert.match(command, /disable-model-invocation: true/);
+});
+
+test("the installed MCP server is dormant outside a parley launch", async () => {
+  const sent = [];
+  const server = new ParleyServer({
+    paths: null,
+    launchId: null,
+    env: {},
+    write: (m) => sent.push(m),
+  });
+  await server.handle({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: { capabilities: {} },
+  });
+  await server.handle({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+  server.handle({ jsonrpc: "2.0", method: "notifications/initialized" });
+  assert.deepEqual(sent[0].result.capabilities, {});
+  assert.equal(sent[0].result.instructions, undefined);
+  assert.deepEqual(sent[1].result.tools, []);
+  assert.equal(server.timer, undefined);
 });

@@ -5,7 +5,10 @@ import { homedir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { resolveClaude } from "./claude-path.js";
 import { isInside } from "./egress.js";
-import { writeJsonAtomic } from "./fsutil.js";
+import { writeFileAtomic, writeJsonAtomic } from "./fsutil.js";
+import { installedEntry } from "./install.js";
+import { notices } from "./compat.js";
+import { loadRoom, projectFor } from "./rooms.js";
 import { forward } from "./paths.js";
 import { launchFile, updateLaunch } from "./sessions.js";
 
@@ -14,13 +17,18 @@ import { launchFile, updateLaunch } from "./sessions.js";
 // under ~/.parley/claude/<launch>/ and removed when claude exits:
 //   --settings      Parley's hooks (exec form: node + cli.js, no shell), and
 //                   rules that keep the agent's file tools out of ~/.parley
-//   --mcp-config    Parley's MCP server
+//   --plugin-dir    a plugin with one command, /parley (on, off, status),
+//                   which only the person can run; the prompt hook handles
+//                   it before it expands
 //   --dangerously-load-development-channels server:parley
-//                   lets that server push messages into the session (Claude
-//                   Code asks you to confirm this when it starts; channels
-//                   are a research preview)
-// Nothing is written to the project or to ~/.claude, and plain `claude`
-// never sees Parley.
+//                   lets Parley's MCP server push messages into the session
+//                   (Claude Code asks you to confirm this when it starts;
+//                   channels are a research preview)
+// The MCP server is the one `parley install` added to Claude Code's user
+// configuration (install.js), which this launch wakes by setting
+// PARLEY_LAUNCH. Before that install the launch passes it with --mcp-config
+// instead: everything works but waking, since Claude Code takes a channel
+// server only from its own configuration.
 
 export class LaunchRefused extends Error {}
 
@@ -70,12 +78,27 @@ export function rulePath(dir, home = homedir()) {
     : `/${abs}`;
 }
 
+// The /parley command. The prompt hook blocks `/parley on` before it
+// expands, so this text reaches Claude only when Parley's hooks are not
+// running; it then just says so.
+const COMMAND = [
+  "---",
+  "description: Parley in this conversation - on, off or status",
+  'argument-hint: "on | off | status"',
+  "disable-model-invocation: true",
+  "---",
+  "",
+  "Parley's hooks did not handle this command, so Parley is not running in this session. Tell the user in one line to start Claude Code with `parley` (not `claude`) to use it here. Do nothing else.",
+  "",
+].join("\n");
+
 export function launchFiles({
   paths,
   launchId,
   nodePath = process.execPath,
   cliPath,
   env = process.env,
+  installed = false,
 }) {
   const dir = join(paths.claude, launchId);
   const hook = (event) => ({
@@ -97,22 +120,39 @@ export function launchFiles({
       deny: [`Read(${own}/**)`, `Edit(${own}/**)`, `Write(${own}/**)`],
     },
   };
-  const mcp = {
-    mcpServers: {
-      parley: {
-        type: "stdio",
-        command: forward(nodePath),
-        args: [forward(cliPath), "mcp", "--launch", launchId],
-        env: env.PARLEY_HOME ? { PARLEY_HOME: env.PARLEY_HOME } : {},
-      },
-    },
-  };
+  const mcp = installed
+    ? null
+    : {
+        mcpServers: {
+          parley: {
+            type: "stdio",
+            command: forward(nodePath),
+            args: [forward(cliPath), "mcp", "--launch", launchId],
+            env: env.PARLEY_HOME ? { PARLEY_HOME: env.PARLEY_HOME } : {},
+          },
+        },
+      };
+  const plugin = join(dir, "plugin");
   return {
     dir,
     settingsFile: join(dir, "settings.json"),
-    mcpFile: join(dir, "mcp.json"),
+    mcpFile: mcp ? join(dir, "mcp.json") : null,
+    pluginDir: plugin,
     settings,
     mcp,
+    pluginFiles: {
+      [join(plugin, ".claude-plugin", "plugin.json")]:
+        JSON.stringify(
+          {
+            name: "parley",
+            description: "The /parley command of a parley launch",
+            version: "0.1.0",
+          },
+          null,
+          2,
+        ) + "\n",
+      [join(plugin, "commands", "parley.md")]: COMMAND,
+    },
   };
 }
 
@@ -120,8 +160,9 @@ export function claudeArgs(files, args) {
   return [
     "--settings",
     files.settingsFile,
-    "--mcp-config",
-    files.mcpFile,
+    ...(files.mcpFile ? ["--mcp-config", files.mcpFile] : []),
+    "--plugin-dir",
+    files.pluginDir,
     "--dangerously-load-development-channels",
     "server:parley",
     ...args,
@@ -139,10 +180,29 @@ export async function launch({
   checkArgs(args);
   const claude = resolveClaude({ env, home: paths.home });
   const launchId = randomBytes(12).toString("base64url");
-  const files = launchFiles({ paths, launchId, cliPath, env });
+  const installed = Boolean(installedEntry({ env, home: paths.home }));
+  // What the room last said about versions (no network here).
+  try {
+    const project = projectFor(paths, cwd);
+    const room = project && loadRoom(paths, project.roomId);
+    if (room)
+      for (const line of notices(room))
+        stderr.write(`parley: ${line}
+`);
+  } catch (error) {
+    stderr.write(`parley: ${error.message}
+`);
+  }
+  if (!installed)
+    stderr.write(
+      "parley: run `parley install` once so new messages can wake this session; until then Claude reads them when it checks the inbox.\n",
+    );
+  const files = launchFiles({ paths, launchId, cliPath, env, installed });
   mkdirSync(files.dir, { recursive: true });
   writeJsonAtomic(files.settingsFile, files.settings);
-  writeJsonAtomic(files.mcpFile, files.mcp);
+  if (files.mcp) writeJsonAtomic(files.mcpFile, files.mcp);
+  for (const [file, text] of Object.entries(files.pluginFiles))
+    writeFileAtomic(file, text);
   updateLaunch(paths, launchId, (l) => {
     l.pid = process.pid;
     l.cwd = cwd;

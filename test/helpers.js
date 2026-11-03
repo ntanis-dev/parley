@@ -56,6 +56,14 @@ export function repo(dir, files = { "README.md": "hello\n" }) {
   return dir;
 }
 
+// A clone of `source` (a person's own copy of the same project).
+export function cloneOf(source, dir, ...flags) {
+  mkdirSync(dirname(dir), { recursive: true });
+  git(dirname(dir), "clone", "-q", ...flags, source, dir);
+  git(dir, "config", "core.autocrlf", "false");
+  return dir;
+}
+
 export async function until(check, { timeoutMs = 8000, everyMs = 25 } = {}) {
   const end = Date.now() + timeoutMs;
   for (;;) {

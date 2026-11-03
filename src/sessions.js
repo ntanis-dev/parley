@@ -66,7 +66,7 @@ export const isPeerTurn = (session) =>
 // WAKES_PER_HOUR wakes since the person last wrote, at least WAKE_GAP_MS
 // apart. Past the cap, messages wait in the inbox for the person.
 export const WAKE_GAP_MS = 20_000;
-export const WAKES_PER_HOUR = 6;
+export const WAKES_PER_HOUR = 12;
 
 export function canWake(session, now = Date.now()) {
   if (!session?.enabled || isBusy(session, now))

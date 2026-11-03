@@ -172,7 +172,9 @@ export function roomKeys(secret) {
 
 const INVITE_PREFIX = "parley1:";
 
-export function encodeInvite({ relay, secret, room, by }) {
+// `tags` say which project the room is for (project.js): keyed hashes of
+// the repository's first commits.
+export function encodeInvite({ relay, secret, room, by, tags = [] }) {
   return (
     INVITE_PREFIX +
     b64u(
@@ -182,6 +184,7 @@ export function encodeInvite({ relay, secret, room, by }) {
           secret: b64u(secret),
           room,
           by: { name: by.name, sign: by.sign, box: by.box },
+          tags,
         }),
       ),
     )
@@ -210,12 +213,30 @@ export function decodeInvite(code) {
     secret: unb64u(invite.secret, 32),
     room: typeof invite.room === "string" ? invite.room : "",
     by: { name: invite.by.name, sign: invite.by.sign, box: invite.by.box },
+    tags: Array.isArray(invite.tags)
+      ? invite.tags
+          .filter(
+            (tag) => typeof tag === "string" && /^[A-Za-z0-9_-]{43}$/.test(tag),
+          )
+          .slice(0, 16)
+      : [],
   };
 }
 
 // ---- Envelopes ---------------------------------------------------------------
 
-export const KINDS = new Set(["join", "message", "diff", "note"]);
+// The kinds this version sends and reads. presence (0.2) carries a member's
+// Parley version; versions before it drop it unread.
+export const KINDS = new Set(["join", "message", "diff", "note", "presence"]);
+const KIND_RE = /^[a-z][a-z0-9-]{0,31}$/;
+
+export class NewerFormat extends CryptoError {
+  constructor(version, from) {
+    super(`envelope format ${version} is newer than this Parley reads`);
+    this.version = version;
+    this.from = from;
+  }
+}
 const NAME_MAX = 64;
 // A clock may be off; a message from further ahead than this is refused.
 const FUTURE_SKEW_MS = 10 * 60 * 1000;
@@ -318,8 +339,15 @@ const isString = (value, max) =>
 // Checks an envelope's shape and signature, and opens its body when it was
 // wrapped for `identity`. Whether the sender may be listened to is the
 // caller's call (rooms.js): this only proves who signed it.
+//
+// A kind this version does not know still has its signature checked and is
+// returned as it is, so the caller can tell the person a member is ahead. An
+// envelope of a newer format cannot even be checked: NewerFormat says so,
+// with the sender id it claims.
 export function openEnvelope(envelope, { identity, roomId, now = Date.now() }) {
   const e = envelope;
+  if (e && Number.isSafeInteger(e.v) && e.v > VERSION)
+    throw new NewerFormat(e.v, typeof e.from === "string" ? e.from : null);
   if (
     !e ||
     typeof e !== "object" ||
@@ -328,7 +356,7 @@ export function openEnvelope(envelope, { identity, roomId, now = Date.now() }) {
     !isString(e.id, 32) ||
     !isString(e.name, NAME_MAX) ||
     !Number.isSafeInteger(e.at) ||
-    !KINDS.has(e.kind) ||
+    !KIND_RE.test(e.kind ?? "") ||
     !Array.isArray(e.to) ||
     e.to.length > 64 ||
     !isString(e.body, 1 << 20) ||

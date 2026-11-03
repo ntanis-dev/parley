@@ -19,6 +19,8 @@ export function parleyPaths(home) {
     root,
     // This person's keys: who they are to the other members.
     identity: join(root, "identity.json"),
+    // This person's settings (config.js).
+    config: join(root, "config.json"),
     // Which project folder is in which room.
     projects: join(root, "projects.json"),
     // One folder per room: its keys, members and messages.

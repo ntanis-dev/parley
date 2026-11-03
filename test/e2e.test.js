@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { realpathSync } from "node:fs";
 import { startRelay } from "../src/relay/server.js";
 import {
+  appendLog,
   createIdentity,
   loadRoom,
   pendingMembers,
@@ -17,17 +18,25 @@ import {
   syncRoom,
 } from "../src/ops.js";
 import { handleHook } from "../src/hooks.js";
-import { ParleyServer } from "../src/mcp.js";
+import { ParleyServer, SENDS_PER_HOUR } from "../src/mcp.js";
 import { readSession } from "../src/sessions.js";
-import { repo, tempHome, until, write } from "./helpers.js";
+import { writeConfig } from "../src/config.js";
+import { notices } from "../src/compat.js";
+import { VERSION } from "../src/version.js";
+import { cloneOf, git, repo, tempHome, until, write } from "./helpers.js";
 
 // Two people, one relay, a whole conversation: open a room, join it, approve,
 // turn Parley on, send, wake, share a diff.
 
-function person(t, name) {
+// Each has their own copy of the project: the first person makes it, the
+// others clone theirs from it.
+function person(t, name, from = null) {
   const { home, paths } = tempHome(t, name);
   const identity = createIdentity(paths, name);
-  const project = realpathSync.native(repo(join(home, "project")));
+  const dir = join(home, "project");
+  const project = realpathSync.native(
+    from ? cloneOf(from.project, dir) : repo(dir),
+  );
   return { name, home, paths, identity, project };
 }
 
@@ -102,7 +111,7 @@ test(
     t.after(() => relay.close());
     const url = `ws://127.0.0.1:${relay.port}`;
     const alice = person(t, "Alice");
-    const bob = person(t, "Bob");
+    const bob = person(t, "Bob", alice);
 
     const { room, invite } = await createRoom({
       paths: alice.paths,
@@ -161,6 +170,19 @@ test(
         b.server.conn?.state === "connected",
     );
 
+    // Each learns the other's Parley version, and the relay's.
+    const bobId = knock.id;
+    const aliceId = Object.keys(loadRoom(bob.paths, room.roomId).members)[0];
+    await until(
+      () =>
+        loadRoom(bob.paths, room.roomId).versions?.members?.[aliceId]?.app ===
+          VERSION &&
+        loadRoom(alice.paths, room.roomId).versions?.members?.[bobId]?.app ===
+          VERSION,
+    );
+    assert.equal(loadRoom(bob.paths, room.roomId).versions.relay.app, VERSION);
+    assert.deepEqual(notices(loadRoom(bob.paths, room.roomId)), []);
+
     // A secret never leaves.
     const refused = await a.tool("send", {
       text: "the key is AKIAABCDEFGHIJKLMNOP",
@@ -174,6 +196,11 @@ test(
     });
     assert.equal(sent.isError, false, sent.content[0].text);
     assert.equal(sent.content[0].text, "Sent to Bob.");
+    // Agents talk on their own: no dialog unless approvals are on.
+    assert.equal(
+      a.sent.some((m) => m.method === "elicitation/create"),
+      false,
+    );
     const [wake] = await until(() => b.channel().length && b.channel());
     assert.match(
       wake.params.content,
@@ -238,9 +265,11 @@ test(
     const id = /Diff id ([A-Za-z0-9_-]+)/.exec(inbox.content[0].text)[1];
     const diff = await a.tool("get_diff", { id });
     assert.match(diff.content[0].text, /\+from bob/);
+    assert.match(diff.content[0].text, /has its base commit/);
     assert.doesNotMatch(diff.content[0].text, /TOKEN/);
 
-    // A declined dialog sends nothing.
+    // With approvals on, a declined dialog sends nothing.
+    writeConfig(alice.paths, (c) => (c.approvals = true));
     const declined = client(alice, "launch-Alice", () => ({
       action: "decline",
     }));
@@ -271,7 +300,7 @@ test(
     const relay = await startRelay({ port: 0, data: ":memory:" });
     t.after(() => relay.close());
     const alice = person(t, "Alice");
-    const bob = person(t, "Bob");
+    const bob = person(t, "Bob", alice);
     const { room, invite } = await createRoom({
       paths: alice.paths,
       identity: alice.identity,
@@ -326,5 +355,100 @@ test(
     assert.match(inbox.content[0].text, /anyone there\?/);
     const status = await b.tool("status");
     assert.match(status.content[0].text, /cannot wake this session/);
+
+    // Talking on its own has a ceiling: so many sends an hour, then refusals.
+    for (let i = 0; i < SENDS_PER_HOUR; i++)
+      appendLog(alice.paths, room.roomId, {
+        id: `old-${i}`,
+        at: Date.now() - 1000,
+        own: true,
+        kind: "message",
+        text: "x",
+      });
+    const limited = await a.tool("send", { text: "one more" });
+    assert.equal(limited.isError, true);
+    assert.match(limited.content[0].text, /limit/);
+  },
+);
+
+test(
+  "only a copy of the same repository can join, and stay on",
+  { timeout: 30_000 },
+  async (t) => {
+    const relay = await startRelay({ port: 0, data: ":memory:" });
+    t.after(() => relay.close());
+    const alice = person(t, "Alice");
+    const { room, invite } = await createRoom({
+      paths: alice.paths,
+      identity: alice.identity,
+      root: alice.project,
+      relay: `ws://127.0.0.1:${relay.port}`,
+      name: "shop",
+    });
+    assert.equal(room.tags.length, 1);
+
+    // An unrelated repository is refused.
+    const { home, paths } = tempHome(t, "Mallory");
+    const mallory = createIdentity(paths, "Mallory");
+    const other = realpathSync.native(
+      repo(join(home, "other"), { "README.md": "a different project\n" }),
+    );
+    await assert.rejects(
+      joinRoom({
+        paths,
+        identity: mallory,
+        root: other,
+        invite: readInvite(invite, mallory),
+      }),
+      /different repository from Alice's/,
+    );
+    // So is a shallow clone that does not reach the first commit, with a way
+    // out.
+    git(alice.project, "commit", "-q", "--allow-empty", "-m", "second");
+    const deeper = realpathSync.native(
+      cloneOf(
+        `file://${alice.project.split("\\").join("/")}`,
+        join(home, "deeper"),
+        "--depth",
+        "1",
+      ),
+    );
+    await assert.rejects(
+      joinRoom({
+        paths,
+        identity: mallory,
+        root: deeper,
+        invite: readInvite(invite, mallory),
+      }),
+      /shallow clone.*--unshallow/,
+    );
+
+    // A real clone joins; if its folder is later swapped for another
+    // repository, `parley on` refuses.
+    const bob = person(t, "Bob", alice);
+    await joinRoom({
+      paths: bob.paths,
+      identity: bob.identity,
+      root: bob.project,
+      invite: readInvite(invite, bob.identity),
+    });
+    const on = hook(bob, "launch-Bob", "user-prompt", {
+      session_id: "Bob-session",
+      prompt: "parley on",
+    });
+    assert.match(on.reason, /Parley is on/);
+    hook(bob, "launch-Bob", "user-prompt", {
+      session_id: "Bob-session",
+      prompt: "parley off",
+    });
+    const { rmSync } = await import("node:fs");
+    rmSync(join(bob.project, ".git"), { recursive: true, force: true });
+    repo(bob.project, { "x.txt": "started over\n" });
+    const refused = hook(bob, "launch-Bob", "user-prompt", {
+      session_id: "Bob-session",
+      prompt: "parley on",
+    });
+    assert.match(refused.reason, /Parley stays off.*different repository/);
+    assert.notEqual(readSession(bob.paths, "Bob-session").enabled, true);
   },
 );

@@ -2,6 +2,8 @@ import { appendFileSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import {
   CryptoError,
+  KINDS,
+  NewerFormat,
   b64u,
   fingerprint,
   memberId,
@@ -17,6 +19,8 @@ import {
 import { readJson, writeJsonAtomic } from "./fsutil.js";
 import { roomDir } from "./paths.js";
 import { cleanLine } from "./inbound.js";
+import { recordMember, validPresence } from "./compat.js";
+import { UPDATE_HINT } from "./version.js";
 import { PATCH_MAX, TEXT_MAX, isInside } from "./egress.js";
 
 // Identities, rooms and what was said in them, all under ~/.parley.
@@ -35,6 +39,10 @@ const PENDING_MAX = 20;
 
 export function loadIdentity(paths) {
   const identity = readJson(paths.identity);
+  if (Number(identity?.v) > 1)
+    throw new RoomError(
+      `Your keys were saved by a newer Parley than this one: ${UPDATE_HINT}.`,
+    );
   return identity && validIdentity(identity) ? identity : null;
 }
 
@@ -101,10 +109,23 @@ export function unbindProject(paths, root) {
 export const roomFile = (paths, roomId) =>
   join(roomDir(paths, roomId), "room.json");
 
+// room.json is format 1. Rooms saved before a field existed get its
+// default here; a room saved by a newer Parley is refused rather than
+// misread (and then overwritten).
+export const ROOM_FORMAT = 1;
+
 export function loadRoom(paths, roomId) {
   if (!/^[A-Za-z0-9_-]{22}$/.test(roomId ?? "")) return null;
   const room = readJson(roomFile(paths, roomId));
   if (!room || room.roomId !== roomId) return null;
+  if (Number(room.v) > ROOM_FORMAT)
+    throw new RoomError(
+      `Room "${room.name}" was saved by a newer Parley than this one: ${UPDATE_HINT}.`,
+    );
+  room.tags ??= [];
+  room.relayKey ??= "";
+  room.members ??= {};
+  room.versions ??= {};
   return room;
 }
 
@@ -128,6 +149,7 @@ export function newRoom({
   relayKey = "",
   name,
   root,
+  tags = [],
   now = Date.now(),
 }) {
   const { roomId } = roomKeys(secret);
@@ -139,6 +161,8 @@ export function newRoom({
     relayKey,
     secret: b64u(secret),
     project: root,
+    // Which repository the room is for (project.js).
+    tags,
     created: new Date(now).toISOString(),
     members: {},
   };
@@ -340,6 +364,17 @@ export function receive(
       return { kind: "skip", why: "own" };
     opened = openEnvelope(envelope, { identity, roomId, now });
   } catch (error) {
+    // A member writing a format this version cannot read: worth telling
+    // the person, as long as the claimed sender is someone approved.
+    if (
+      error instanceof NewerFormat &&
+      room.members[error.from]?.status === "approved"
+    ) {
+      updateRoom(paths, roomId, (fresh) =>
+        recordMember(fresh, error.from, (m) => (m.newerFormat = error.version)),
+      );
+      return { kind: "skip", why: "newer format" };
+    }
     if (error instanceof CryptoError || error instanceof SyntaxError)
       return { kind: "skip", why: "unreadable" };
     throw error;
@@ -367,6 +402,28 @@ export function receive(
   }
   if (member.status !== "approved") return { kind: "skip", why: member.status };
   if (head.kind === "join") return { kind: "skip", why: "announce" };
+  if (head.kind === "presence") {
+    const presence = body === null ? null : validPresence(body);
+    if (!presence) return { kind: "skip", why: "not for me" };
+    updateRoom(paths, roomId, (fresh) =>
+      recordMember(fresh, head.from, (m) => {
+        Object.assign(m, presence, { at: now });
+        delete m.unknownKinds;
+        delete m.newerFormat;
+      }),
+    );
+    return { kind: "presence", member: head.from, app: presence.app };
+  }
+  if (!KINDS.has(head.kind)) {
+    updateRoom(paths, roomId, (fresh) =>
+      recordMember(fresh, head.from, (m) => {
+        m.unknownKinds = [
+          ...new Set([...(m.unknownKinds ?? []), head.kind]),
+        ].slice(0, 10);
+      }),
+    );
+    return { kind: "skip", why: "unknown kind" };
+  }
   const kept = body === null ? null : validBody(head.kind, body);
   if (!kept) return { kind: "skip", why: "not for me" };
   if (readLog(paths, roomId).some((e) => e.id === head.id))

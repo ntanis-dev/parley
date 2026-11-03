@@ -1,6 +1,6 @@
 {
   "name": "parley-relay-cloudflare",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "license": "MIT",
   "description": "The Parley relay as a Cloudflare Worker with a Durable Object per room.",
