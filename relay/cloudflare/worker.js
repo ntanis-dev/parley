@@ -4,6 +4,7 @@ import {
   LIMITS,
   ROOM_PATH_RE,
   RoomStore,
+  addressKey,
   onFrame,
 } from "../../src/relay/core.js";
 
@@ -11,7 +12,8 @@ import {
 // SQLite storage, and hibernating WebSockets so an idle room costs nothing.
 // The logic is the same as the Node relay's (src/relay/core.js). Set a relay
 // key with `npx wrangler secret put PARLEY_RELAY_KEY` so only people you
-// give it to can open rooms on your relay.
+// give it to can open rooms on your relay. Tries at a new room are limited
+// per address by the KEY_TRIES rate limit (wrangler.jsonc), across all rooms.
 
 const plain = (status, text) =>
   new Response(text, {
@@ -78,7 +80,12 @@ export class Room extends DurableObject {
       return plain(503, "Room busy\n");
     const { 0: client, 1: server } = new WebSocketPair();
     this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({ roomId, authed: false, opened: Date.now() });
+    server.serializeAttachment({
+      roomId,
+      authed: false,
+      opened: Date.now(),
+      address: request.headers.get("cf-connecting-ip") ?? "",
+    });
     if ((await this.ctx.storage.getAlarm()) === null)
       await this.ctx.storage.setAlarm(Date.now() + LIMITS.helloMs);
     return new Response(null, { status: 101, webSocket: client });
@@ -91,6 +98,7 @@ export class Room extends DurableObject {
     await onFrame(conn, message, {
       store: this.store,
       relayKey: this.env.PARLEY_RELAY_KEY ?? "",
+      guard: this.guard(),
       peers: () =>
         this.ctx
           .getWebSockets()
@@ -100,6 +108,19 @@ export class Room extends DurableObject {
     try {
       ws.serializeAttachment(conn.state);
     } catch {}
+  }
+
+  // Every try at a new room counts against its address, right key or not;
+  // without the binding (an older deploy), nothing is limited.
+  guard() {
+    const limit = this.env.KEY_TRIES;
+    return {
+      allows: async (address) =>
+        limit
+          ? (await limit.limit({ key: addressKey(address) })).success
+          : true,
+      missed: () => {},
+    };
   }
 
   async webSocketClose(ws, code) {

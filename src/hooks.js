@@ -8,6 +8,7 @@ import {
 import { notices } from "./compat.js";
 import { readConfig } from "./config.js";
 import { cleanLine } from "./inbound.js";
+import { authorOf } from "./authors.js";
 import { glyphSets, pickGlyphs } from "./ui.js";
 import { Refusal, ignoreRules, isIgnored, projectPath } from "./egress.js";
 import {
@@ -124,7 +125,7 @@ const short = (text, max = 240) => {
 };
 
 // One line for one log entry, as the person reads it in their session, under
-// Parley's mark: "<mark> Parley <arrow> Jo: ...", in the glyphs of the
+// Parley's mark: "<mark> Parley <arrow> Jo's agent: ...", in the glyphs of the
 // terminal Claude Code runs in (ui.js), as the status line row is.
 export function lineFor(entry, room, g = glyphSets[pickGlyphs()]) {
   const nameOf = (id) => room.members[id]?.name ?? "someone";
@@ -135,7 +136,7 @@ export function lineFor(entry, room, g = glyphSets[pickGlyphs()]) {
     : "the room";
   const arrow = entry.own
     ? `${g.mark} Parley ${g.sent}`
-    : `${g.mark} Parley ${g.got} ${cleanLine(entry.name)}${entry.human ? " (typed by them)" : ""}`;
+    : `${g.mark} Parley ${g.got} ${authorOf(entry)}`;
   const kb = (n) => `${Math.max(1, Math.round(n / 1024))} KB`;
   switch (entry.kind) {
     case "message":

@@ -173,11 +173,19 @@ export function launchFiles({
 }
 
 // What Claude is asked first in a launch that does not start with a prompt
-// of the person's own: arm the message watch, and keep it armed. (With a
-// prompt of theirs, the prompt hook asks the same, and the Stop hook makes
-// sure of it at the end of every turn.)
-export const openingPrompt = (watch) =>
-  `Parley is on in this session. Before anything else, arm Parley's message watch: the Monitor tool with command: ${watch}, description: "Parley messages", timeout_ms: 1800000 (load Monitor with ToolSearch if it is not loaded; use exactly that command). Keep it armed for the whole session: whenever it ends or expires, arm it again the same way. Then say in one short line that Parley is listening, and wait for me.`;
+// of the person's own, which the person sees as their first message, so it
+// is one line: arm the message watch and keep it armed. What Parley is, its
+// MCP instructions and the session start context already say. A resumed
+// conversation knows the rest from before; this launch's watch is a new one,
+// so it is only asked to arm that. (With a prompt of theirs, the prompt hook
+// asks the same, and the Stop hook makes sure of it at the end of every turn.)
+const watchHow = (watch) =>
+  `the Monitor tool with command: ${watch}, description: "Parley messages", timeout_ms: 1800000 (load Monitor with ToolSearch if needed; use exactly that command)`;
+
+export const openingPrompt = (watch, resumed = false) =>
+  resumed
+    ? `Parley is on again: arm its new message watch, ${watchHow(watch)}, keep it armed, and wait for me.`
+    : `Parley is on: arm its message watch, ${watchHow(watch)}, keep it armed all session, then say in one line that you are listening.`;
 
 // The person's arguments first (so a prompt of theirs is not read as a value
 // of --mcp-config, which takes several), then Parley's. A launch without a
@@ -186,7 +194,7 @@ export function claudeArgs(files, args) {
   const parsed = parseClaudeArgs(args);
   const opening =
     parsed.interactive && !parsed.positionals.length
-      ? [openingPrompt(files.watch)]
+      ? [openingPrompt(files.watch, parsed.session.mode !== "new")]
       : [];
   return [
     ...opening,

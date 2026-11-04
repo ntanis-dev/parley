@@ -6,3 +6,4 @@ coverage/
 *.db-shm
 *.db-wal
 relay/cloudflare/.wrangler/
+relay/.env

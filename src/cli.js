@@ -807,14 +807,37 @@ const COMMANDS = {
     return 0;
   },
 
-  async relay({ values, io, env, paths }) {
+  async relay({ positionals, values, io, env, paths }) {
+    const { newRelayKey } = await import("./crypto.js");
+    // `parley relay key`: a new relay key alone on stdout, to paste or for
+    // PARLEY_RELAY_KEY=$(parley relay key).
+    if (positionals[0] === "key") {
+      io.out(newRelayKey());
+      return 0;
+    }
+    if (positionals.length)
+      throw new UsageError(
+        `"parley relay ${positionals[0]}" is not a command; "parley relay key" prints a relay key.`,
+      );
     const { startRelay, RELAY_DEFAULTS } = await import("./relay/server.js");
+    const { weakRelayKey, RELAY_KEY_MIN } = await import("./relay/core.js");
     const ui = io.ui;
     const host = values.host ?? env.PARLEY_RELAY_HOST ?? RELAY_DEFAULTS.host;
     const port = Number(
       values.port ?? env.PARLEY_RELAY_PORT ?? RELAY_DEFAULTS.port,
     );
     const relayKey = env.PARLEY_RELAY_KEY ?? "";
+    // A key anyone could guess is worse than none: the relay would look
+    // closed and not be.
+    if (relayKey && weakRelayKey(relayKey))
+      throw new UsageError(
+        `PARLEY_RELAY_KEY is too weak: it needs ${RELAY_KEY_MIN} characters or more, and not a few repeated. "parley relay key" makes a strong one.`,
+      );
+    // Behind a proxy of its own (Caddy, `tailscale serve`), every connection
+    // comes from the proxy: the address it saw is in X-Forwarded-For.
+    const trustProxy = ["1", "true", "yes"].includes(
+      String(env.PARLEY_RELAY_TRUST_PROXY ?? "").toLowerCase(),
+    );
     const tlsCert = values["tls-cert"] ?? env.PARLEY_RELAY_TLS_CERT ?? null;
     const tlsKey = values["tls-key"] ?? env.PARLEY_RELAY_TLS_KEY ?? null;
     const data = values.data ?? env.PARLEY_RELAY_DATA ?? RELAY_DEFAULTS.data;
@@ -831,6 +854,7 @@ const COMMANDS = {
       tlsCert,
       tlsKey,
       maxRooms,
+      trustProxy,
       log: (line) => io.err(line),
     });
     ui.heading("Relay", `version ${VERSION}`);
@@ -843,9 +867,12 @@ const COMMANDS = {
     ui.fact("Rooms", `at most ${maxRooms}`);
     ui.fact(
       "Relay key",
-      relayKey ? "set: only those who have it open rooms" : "none",
+      relayKey
+        ? "set: only those who have it open rooms (5 wrong in 10 minutes, and an address waits 15)"
+        : "none",
       relayKey ? "" : "warn",
     );
+    if (trustProxy) ui.fact("Addresses", "as the proxy in front saw them");
     if (
       !relayKey ||
       (!relay.tls && !["127.0.0.1", "localhost", "::1"].includes(host))
@@ -853,7 +880,7 @@ const COMMANDS = {
       ui.blank();
     if (!relayKey)
       ui.warn(
-        "Without PARLEY_RELAY_KEY, anyone who can reach this relay can open rooms on it.",
+        "Without PARLEY_RELAY_KEY, anyone who can reach this relay can open rooms on it. `parley relay key` makes one.",
       );
     if (!relay.tls && !["127.0.0.1", "localhost", "::1"].includes(host))
       ui.warn(
@@ -1098,6 +1125,7 @@ const HELP = [
         "parley relay [--port P]",
         "host a relay (PARLEY_RELAY_KEY: who opens rooms)",
       ],
+      ["parley relay key", "print a new, strong relay key"],
     ],
   ],
 ];

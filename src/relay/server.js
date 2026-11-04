@@ -3,7 +3,14 @@ import { createServer as createHttpsServer } from "node:https";
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { WebSocketServer } from "ws";
-import { CLOSE, LIMITS, ROOM_PATH_RE, RoomStore, onFrame } from "./core.js";
+import {
+  CLOSE,
+  KeyGuard,
+  LIMITS,
+  ROOM_PATH_RE,
+  RoomStore,
+  onFrame,
+} from "./core.js";
 
 // The relay as a Node server: `parley relay`, and what the Docker image runs.
 // One SQLite file holds every room. TLS is either here (--tls-cert and
@@ -48,6 +55,8 @@ export function startRelay({
   tlsKey = null,
   maxRooms = RELAY_DEFAULTS.maxRooms,
   maxSockets = RELAY_DEFAULTS.maxSockets,
+  trustProxy = false,
+  guard = new KeyGuard(),
   log = () => {},
 } = {}) {
   const sql = sqlite(data);
@@ -55,6 +64,19 @@ export function startRelay({
   store.init();
   const rooms = new Map();
   let sockets = 0;
+  // Who is connecting, for the relay key guard: the socket's address, or
+  // behind a proxy of our own (trustProxy), the one it saw: the last entry of
+  // X-Forwarded-For, which it appends and nobody before it can.
+  const addressOf = (req) => {
+    const forwarded = trustProxy
+      ? String(req.headers["x-forwarded-for"] ?? "")
+          .split(",")
+          .map((part) => part.trim())
+          .filter(Boolean)
+          .at(-1)
+      : null;
+    return forwarded || req.socket.remoteAddress || "";
+  };
 
   const onRequest = (req, res) => {
     if (req.method !== "GET" && req.method !== "HEAD")
@@ -98,13 +120,15 @@ export function startRelay({
       (rooms.get(roomId)?.size ?? 0) >= LIMITS.socketsPerRoom
     )
       return reject(503, "Service Unavailable");
-    wss.handleUpgrade(req, socket, head, (ws) => accept(ws, roomId));
+    wss.handleUpgrade(req, socket, head, (ws) =>
+      accept(ws, roomId, addressOf(req)),
+    );
   });
 
-  function accept(ws, roomId) {
+  function accept(ws, roomId, address) {
     sockets++;
     const conn = {
-      state: { roomId, authed: false },
+      state: { roomId, authed: false, address },
       send: (frame) => {
         if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(frame));
       },
@@ -135,6 +159,7 @@ export function startRelay({
             store,
             relayKey,
             maxRooms,
+            guard,
             peers: () => [...members].filter((peer) => peer.state.authed),
           }),
         )

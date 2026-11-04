@@ -35,6 +35,10 @@ const B64U_RE = /^[A-Za-z0-9_-]*$/;
 
 export const b64u = (bytes) => Buffer.from(bytes).toString("base64url");
 
+// A relay key (PARLEY_RELAY_KEY): 32 random bytes in hex, which no shell or
+// option parser reads as anything else (base64 can start with a dash).
+export const newRelayKey = () => randomBytes(32).toString("hex");
+
 export function unb64u(text, length = null) {
   if (typeof text !== "string" || !B64U_RE.test(text))
     throw new CryptoError("not base64url");

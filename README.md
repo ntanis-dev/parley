@@ -123,9 +123,12 @@ Everything sent and received shows in your session as it happens, one line each,
 ```
 ⇄ Parley → Jo: Pulled your changes and resolved the conflict in cart.js; pushed.
 ⇄ Parley ← Jo: thanks! I'll rebase on top.
-⇄ Parley ← Jo remembered "release": We tag releases on Thursdays.
-⇄ Parley ← Alex is working on src/cart until 15:30 UTC
+⇄ Parley ← Jo's agent remembered "release": We tag releases on Thursdays.
+⇄ Parley ← Chris' agent is working on src/cart until 15:30 UTC
 ```
+
+A member's own words show under their name, and what their agent sent as theirs: "Jo's agent", or "Chris' agent"
+for a name that ends in s.
 
 And a `parley` session adds one row to Claude Code's status line, under yours:
 
@@ -297,14 +300,19 @@ Within the project, the agents decide what is worth saying: once a message is se
 
 The relay is a mailbox per room for sealed messages. It never holds a key that opens one, so a friend, a team or
 a cheap server can host it for everyone. Set a **relay key** so only people you give it to can open rooms on it;
-they pass it to `parley create --relay-key <key>` (joining needs only the invite).
+they pass it to `parley create --relay-key <key>` (joining needs only the invite). Make it long and random, never a
+password: anyone who can reach the relay can try keys against it. `parley relay key` prints a new one (64 hex
+characters; `openssl rand -hex 32` does the same where Parley is not installed). A relay will not open rooms with a
+weak one, and an address that gets the key wrong 5 times in 10 minutes cannot try again for 15 (on Cloudflare, an
+address gets 10 tries a minute); rooms that exist keep opening with their own token, which is 256 random bits.
 
 **Cloudflare Workers** (free plan, TLS and uptime handled):
 
 ```sh
 cd relay/cloudflare
 npx wrangler deploy
-npx wrangler secret put PARLEY_RELAY_KEY
+parley relay key                           # a new key: give it to the people who create rooms
+npx wrangler secret put PARLEY_RELAY_KEY   # and paste it here
 ```
 
 Each room is a Durable Object with its own SQLite storage, and idle rooms hibernate. The relay's address is
@@ -314,7 +322,8 @@ Each room is a Durable Object with its own SQLite storage, and idle rooms hibern
 
 ```sh
 cd relay
-PARLEY_RELAY_KEY=$(openssl rand -base64 24) docker compose up -d
+echo "PARLEY_RELAY_KEY=$(parley relay key)" > .env   # keep it: the people who create rooms need it
+docker compose up -d
 ```
 
 That listens on `127.0.0.1:8787`, for `tailscale serve` or a reverse proxy you already run. To have Caddy fetch a
@@ -328,7 +337,9 @@ PARLEY_RELAY_KEY=… parley relay --host 100.x.y.z     # then: parley create --r
 ```
 
 Parley accepts unencrypted `ws://` only on the same computer and on a Tailscale tailnet (100.64.0.0/10), which
-encrypts by itself. Anywhere else the relay needs `wss://`. `--tls-cert` and `--tls-key` serve TLS directly.
+encrypts by itself. Anywhere else the relay needs `wss://`. `--tls-cert` and `--tls-key` serve TLS directly. Behind
+a proxy of your own, set `PARLEY_RELAY_TRUST_PROXY=1` so wrong keys count against the address the proxy saw
+(`X-Forwarded-For`) rather than the proxy's; the Docker setup does.
 
 ## Versions and updates
 

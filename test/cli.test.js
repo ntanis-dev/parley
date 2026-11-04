@@ -41,3 +41,37 @@ for (const [why, env, tty] of [
       /needs a person at a terminal/,
     );
   });
+
+test("parley relay key prints a new, strong key alone on its line", async (t) => {
+  const { home } = tempHome(t, "Pat");
+  const keys = [];
+  for (let i = 0; i < 2; i++) {
+    const { out, io } = ioFor({ PARLEY_HOME: home }, false);
+    const code = await main(["relay", "key"], {
+      env: { PARLEY_HOME: home },
+      cwd: home,
+      io,
+    });
+    assert.equal(code, 0);
+    assert.equal(out.length, 1);
+    keys.push(out[0].trim());
+  }
+  for (const key of keys) assert.match(key, /^[0-9a-f]{64}$/);
+  assert.notEqual(keys[0], keys[1]);
+});
+
+test("parley relay will not start with a weak relay key", async (t) => {
+  const { home } = tempHome(t, "Pat");
+  for (const key of ["letmein", "x".repeat(30)]) {
+    const env = { PARLEY_HOME: home, PARLEY_RELAY_KEY: key };
+    const { io } = ioFor(env, false);
+    await assert.rejects(
+      main(["relay", "--port", "0", "--data", ":memory:"], {
+        env,
+        cwd: home,
+        io,
+      }),
+      /too weak/,
+    );
+  }
+});

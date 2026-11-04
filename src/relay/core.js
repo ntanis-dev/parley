@@ -55,6 +55,77 @@ export const ROOM_PATH_RE = /^\/v1\/rooms\/([A-Za-z0-9_-]{22})$/;
 
 export const CLOSE = { normal: 1000, policy: 1008, tooBig: 1009, busy: 1013 };
 
+// The relay key decides who opens new rooms, and anyone who can reach the
+// relay can try keys, so a short or repetitive one is refused (`parley relay
+// key` makes 64 hex characters). Room tokens are 256 random bits: nothing to
+// guess there.
+export const RELAY_KEY_MIN = 24;
+export const weakRelayKey = (key) =>
+  key.length < RELAY_KEY_MIN || new Set(key).size < 10;
+
+// The address a limit counts by: IPv4 as it is, IPv6 by its /64 network,
+// since whoever has one address there usually has them all.
+export function addressKey(address) {
+  const text = String(address ?? "").replace(/^::ffff:(?=\d+\.)/i, "");
+  if (!text.includes(":")) return text;
+  const [head, tail] = text.split("::");
+  const groups =
+    tail === undefined
+      ? head.split(":")
+      : [
+          ...(head ? head.split(":") : []),
+          ...Array(
+            8 -
+              (head ? head.split(":").length : 0) -
+              (tail ? tail.split(":").length : 0),
+          ).fill("0"),
+          ...(tail ? tail.split(":") : []),
+        ];
+  return `${groups
+    .slice(0, 4)
+    .map((g) => g.toLowerCase().replace(/^0+(?=.)/, ""))
+    .join(":")}::/64`;
+}
+
+// Wrong relay keys, counted by address: one that gets it wrong `misses` times
+// within `windowMs` is not heard about new rooms for `lockMs` (its attempts
+// are refused unchecked, even with the right key). Rooms that exist still
+// open with their token, so people sharing an address keep their rooms.
+export class KeyGuard {
+  constructor({
+    misses = 5,
+    windowMs = 10 * 60_000,
+    lockMs = 15 * 60_000,
+    addresses = 10_000,
+  } = {}) {
+    Object.assign(this, { misses, windowMs, lockMs, addresses });
+    this.seen = new Map();
+  }
+
+  allows(address, now) {
+    const entry = this.seen.get(addressKey(address));
+    return !entry || now >= entry.until;
+  }
+
+  missed(address, now) {
+    const key = addressKey(address);
+    const entry = this.seen.get(key) ?? { at: [], until: 0 };
+    entry.at = entry.at.filter((at) => now - at < this.windowMs);
+    entry.at.push(now);
+    if (entry.at.length >= this.misses) {
+      entry.until = now + this.lockMs;
+      entry.at = [];
+    }
+    // Newest last, so the oldest go first when there are too many.
+    this.seen.delete(key);
+    this.seen.set(key, entry);
+    for (const old of this.seen.keys()) {
+      if (this.seen.size <= this.addresses) break;
+      this.seen.delete(old);
+    }
+  }
+}
+
 // Web Crypto, so the same code runs in Node and in a Worker.
 async function sha256Hex(text) {
   const bytes = new TextEncoder().encode(text);
@@ -239,10 +310,12 @@ function refuse(conn, code, message, close = CLOSE.policy) {
 // close(code, reason) }; state holds { roomId, authed, bucket, bucketAt }.
 // `peers()` lists the other authenticated connections of the same room.
 // `limits.maxRooms` caps how many rooms this relay holds (0: no cap).
+// `guard` ({ allows(address, now), missed(address, now) }: a KeyGuard, or the
+// Worker's rate limit) decides whether state.address may try the relay key.
 export async function onFrame(
   conn,
   text,
-  { store, relayKey = "", peers, now = Date.now(), maxRooms = 0 },
+  { store, relayKey = "", peers, now = Date.now(), maxRooms = 0, guard = null },
 ) {
   const frame = parseFrame(text);
   if (!frame)
@@ -276,6 +349,11 @@ export async function onFrame(
       return conn.close(CLOSE.policy, "version");
     }
     state.wire = wire;
+    // The guard is asked about new rooms only, and here, since it may await.
+    const heard =
+      relayKey && guard && !store.room(state.roomId)
+        ? await guard.allows(state.address ?? "", now)
+        : true;
     // Every hash first: from here to the end of the hello nothing awaits, so
     // two hellos for a new room cannot both create it.
     const tokenHash = await sha256Hex(`parley-relay-token|${frame.token}`);
@@ -291,12 +369,27 @@ export async function onFrame(
     const room = store.room(state.roomId);
     let created = false;
     if (!room) {
-      if (!keyOk)
+      if (relayKey && weakRelayKey(relayKey))
+        return refuse(
+          conn,
+          "weak-relay-key",
+          "This relay's key is too weak to open rooms with: its host needs to set a strong one (`parley relay key` makes one).",
+        );
+      if (!heard)
+        return refuse(
+          conn,
+          "relay-key-wait",
+          "Too many wrong relay keys from here: this relay opens no new rooms for you for a while.",
+          CLOSE.busy,
+        );
+      if (!keyOk) {
+        guard?.missed(state.address ?? "", now);
         return refuse(
           conn,
           "relay-key",
           "This relay needs its relay key to open a new room.",
         );
+      }
       if (maxRooms && store.roomCount() >= maxRooms)
         return refuse(
           conn,

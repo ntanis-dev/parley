@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { realpathSync, mkdirSync } from "node:fs";
 import { handleHook } from "../src/hooks.js";
 import { glyphSets, pickGlyphs } from "../src/ui.js";
+import { authorOf } from "../src/authors.js";
 import {
   appendLog,
   bindProject,
@@ -247,6 +248,7 @@ test("what is sent and received shows once, as lines for the person", (t) => {
     name: "Jo",
     kind: "message",
     text: "thanks!",
+    human: true,
   });
   appendLog(paths, roomId, {
     id: "m-3",
@@ -263,8 +265,13 @@ test("what is sent and received shows once, as lines for the person", (t) => {
   assert.deepEqual(out.systemMessage.split("\n"), [
     `${g.mark} Parley ${g.sent} the room: pulling now`,
     `${g.mark} Parley ${g.got} Jo: thanks!`,
-    `${g.mark} Parley ${g.got} Jo remembered "release": tag on Fridays`,
+    `${g.mark} Parley ${g.got} Jo's agent remembered "release": tag on Fridays`,
   ]);
+  // Their agent, or them: "Jo's agent", "Chris' agent", "Chris".
+  assert.equal(authorOf({ name: "Chris" }), "Chris' agent");
+  assert.equal(authorOf({ name: "Chris", human: true }), "Chris");
+  assert.equal(authorOf({ own: true }), "your agent");
+  assert.equal(authorOf({ own: true, human: true }), "you");
   assert.equal(hook("post-tool-use", { tool_name: "mcp__parley__send" }), null);
 });
 
@@ -350,13 +357,16 @@ test("a launch: hooks without a shell, a status line, the watch allowed, ~/.parl
     "--launch",
     LAUNCH,
   ]);
-  // No prompt of the person's own: Claude is first asked to arm the watch.
+  // No prompt of the person's own: Claude is first asked, in one line, to arm
+  // the watch; a resumed conversation only to arm this launch's new one.
+  const fresh = claudeArgs(files, [])[0];
+  assert.match(fresh, /^Parley is on: arm its message watch, /);
+  assert.ok(fresh.includes(files.watch));
+  assert.ok(fresh.length < 400, fresh);
   const args = claudeArgs(files, ["--resume"]);
-  assert.match(
-    args[0],
-    /^Parley is on in this session\. Before anything else, arm/,
-  );
+  assert.match(args[0], /^Parley is on again: arm its new message watch, /);
   assert.ok(args[0].includes(files.watch));
+  assert.match(claudeArgs(files, ["-c"])[0], /^Parley is on again/);
   assert.deepEqual(args.slice(1), [
     "--resume",
     "--settings",

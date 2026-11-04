@@ -53,7 +53,14 @@ function privateHost(hostname) {
   return a === 127 || (a === 100 && b >= 64 && b <= 127);
 }
 
-const FATAL = new Set(["auth", "relay-key", "bad-hello", "version"]);
+const FATAL = new Set([
+  "auth",
+  "relay-key",
+  "relay-key-wait",
+  "weak-relay-key",
+  "bad-hello",
+  "version",
+]);
 
 export class RoomConnection {
   constructor({

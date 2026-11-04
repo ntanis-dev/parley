@@ -1,6 +1,6 @@
 {
   // The Parley relay on Cloudflare Workers. Deploy with `npx wrangler deploy`
-  // from this folder, then set a relay key:
+  // from this folder, then set a relay key (`parley relay key` makes one):
   //   npx wrangler secret put PARLEY_RELAY_KEY
   "name": "parley-relay",
   "main": "worker.js",
@@ -9,5 +9,15 @@
     "bindings": [{ "name": "ROOMS", "class_name": "Room" }],
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }],
+  // Tries at opening a new room (each needs the relay key), per address: 10 a
+  // minute in each Cloudflare location. The namespace id is any number not
+  // used by another rate limit on your account.
+  "ratelimits": [
+    {
+      "name": "KEY_TRIES",
+      "namespace_id": "4207",
+      "simple": { "limit": 10, "period": 60 },
+    },
+  ],
   "observability": { "enabled": false },
 }
