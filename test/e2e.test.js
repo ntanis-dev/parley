@@ -208,6 +208,7 @@ test(
     );
     assert.match(wake.params.content, /User\.contact_email/);
     assert.equal(wake.params.meta.from, "Alice");
+    assert.match(wake.params.content, /select:mcp__parley__send/);
 
     // The message counts as read only once the woken turn shows up.
     const sid = sessions.Bob;

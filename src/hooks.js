@@ -28,7 +28,9 @@ import {
 //   stop           the turn is over
 
 // What a turn a member's message started may still do: read, search, and
-// use Parley (whose own tools ask the person before anything leaves).
+// use Parley (whose own tools check everything that leaves). ToolSearch
+// only loads tool definitions, and it is how Claude Code loads Parley's own
+// tools when they were deferred, so a woken turn needs it to reply.
 const READING_TOOLS = new Set([
   "Read",
   "Grep",
@@ -38,6 +40,7 @@ const READING_TOOLS = new Set([
   "TodoWrite",
   "TaskList",
   "TaskGet",
+  "ToolSearch",
 ]);
 const PARLEY_TOOL_RE = /^mcp__parley__/;
 

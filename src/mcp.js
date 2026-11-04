@@ -454,6 +454,11 @@ export class ParleyServer {
         entries.filter((e) => delivered.includes(e.id)).map((e) => e.name),
       ),
     ];
+    // Parley's tools may be deferred in this session; say how to reach them.
+    if (delivered.length)
+      parts.push(
+        "To answer, use Parley's send tool (mcp__parley__send; if it is not loaded yet, load it with ToolSearch, query select:mcp__parley__send).",
+      );
     this.notify("notifications/claude/channel", {
       content: parts.join("\n\n"),
       meta: {

@@ -137,6 +137,8 @@ test("a turn a member's message started may only read", (t) => {
     "Read",
     "Grep",
     "Glob",
+    // Loading Parley's deferred tools is how a woken turn gets to reply.
+    "ToolSearch",
     "mcp__parley__inbox",
     "mcp__parley__send",
   ])
