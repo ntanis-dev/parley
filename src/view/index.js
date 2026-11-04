@@ -197,6 +197,10 @@ export async function runView({
   instance = render(h(ViewApp, { store, actions, view }), {
     stdout: output,
     stdin: keys,
+    // The view runs for a person at a terminal (the CLI makes sure), so it
+    // draws every frame even where CI is set, which Ink would read as "only
+    // the last frame".
+    interactive: true,
     exitOnCtrlC: false,
     patchConsole: false,
     alternateScreen: true,

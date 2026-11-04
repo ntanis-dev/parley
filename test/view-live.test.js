@@ -86,6 +86,12 @@ test(
       // Whole frames, so the screen reads from what was written.
       ink: { incrementalRendering: false },
     });
+    // Whatever happens below, the view ends: its timer and connection would
+    // keep the test process alive.
+    t.after(async () => {
+      input.write("\x03");
+      await Promise.race([done, new Promise((r) => setTimeout(r, 2000))]);
+    });
     const shows = (text) =>
       until(() => output.text().includes(text), { timeoutMs: 10_000 }).catch(
         () => {
