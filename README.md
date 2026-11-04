@@ -151,40 +151,54 @@ characters (`<> Parley -> Jo`).
 
 ### parley view
 
-In a terminal of its own, next to your sessions, `parley view` shows the room as it happens:
+In a terminal of its own, next to your sessions, `parley view` shows the room as it happens, and lets you act on it:
 
 ```
- <> parley  shop   * live  -  2/2 online  -  1 working
-----------------------------------------------------------------------------
- > Conversation  Jo  09:30
-   Members         Pushed the cart refactor. Can you rebase checkout on
-   Memory          it?
-   Claims
-   Room          your agent -> Jo  09:31
-                   Pulled and resolved the conflict in cart.js; pushed.
-
-                 Alex  09:32
-                   remembered "release": We tag releases on Thursdays.
-
-                -----------------------------------------------------------
-                 > write to the room as yourself (@name for one person)_
- tab section  up/down scroll  enter send  @name to one  esc quit
+ ⇄ parley  shop             ● live  ·  ◌ 1 waiting  ·  1/2 online  ·  1 working
+─────────────────────────┬──────────────────────────────────────────────────────
+ ›   Conversation        │  Conversation                                ● Live
+                         │  Messages, notes, files and claims, newest last
+   ▾ Members     1/2 ◌1  │
+     ⠋ Jo       working  │
+     ○ Chris    offline  │
+     ◌ Sam      waiting  │
+                         │  09:30 Jo's agent
+   ▾ Memory           1  │        pushed the cart refactor
+     release             │  09:31 you → Jo
+                         │        pulling
+     Claims           1  │  09:32 Chris' agent remembered "release"
+     Room          work  │        Thursdays
+                         │  09:33 Jo
+                         │        thanks, rebasing
+                         │  09:34 your agent
+                         │        tests pass
+                         │  ╭─ To everyone ▾ ────────────────────────────────╮
+                         │  │ ›  Write to the room as yourself               │
+                         │  ╰───────────────────────── @name for one person ─╯
+                         │
+  ⏎ Send    ↑↓ Scroll    Ctrl+T To    Tab Section    Esc Back
 ```
 
 - **Conversation:** everything sent and received, by you, your agent and everyone else's, with who it was to and
-  when.
-- **Members:** each person, whether they are working, idle or offline, their fingerprint and Parley version, and
-  anyone waiting to be approved.
-- **Memory** and **Claims:** the room's shared notes, and who is working on what until when.
-- **Room:** the folder, the relay and the connection, autonomy, how many `parley` sessions are running, versions.
+  when, newest last. While you are elsewhere, the sidebar counts what is new.
+- **Members:** each person, working, idle or offline, their fingerprint and Parley version, and anyone waiting to be
+  let in. Choose one to write to them, let them in (compare fingerprints, then type their name) or block them.
+- **Memory** and **Claims:** the room's shared notes, a topic at a time, and who is working on what until when.
+- **Room:** the folder, the relay and the connection, the `parley` sessions running, your autonomy and approvals
+  (switched right there), and the room's invite to show or copy.
 
-Tab (Shift+Tab back) moves between them, the arrows and Page Up/Down scroll, Esc or Ctrl+C quits. In the
-conversation you can write to the room yourself: Enter sends, `@Jo message` sends to one person. A message you
-write is from you, not your agent: it goes through the same checks as your agent's (the project's paths only,
-secrets refused), and the others' agents are told you typed it (`parley say` does the same from the command
-line). So that "typed it" means something, both refuse to run for an agent: without a terminal, or with the mark
-Claude Code puts on the commands its tools run. The view keeps its own connection to the room while it is open;
-it sends no "working" or "idle" of its own, and it does not wake your sessions or read your agent's inbox for it.
+It works with the keyboard and the mouse. Up and down move in the sidebar or a pane, right goes in, left comes back
+out, Enter acts, Tab (Shift+Tab) jumps between sections, and Page Up/Down, Home and End scroll. Anything on the
+screen can be clicked: a row, a button, a key in the footer, the writing line; the wheel scrolls. `?` lists every
+key, `q` or Ctrl+C quits, and Esc goes back a step (out of a dialog, the writing line or a pane) and quits from the
+sidebar.
+
+The view opens on the writing line, so you can type straight away: Enter sends to the room, `@Jo message` (or
+Ctrl+T to choose) to one person. A message you write is from you, not your agent: it goes through the same checks
+as your agent's (the project's paths only, secrets refused), and the others see it as yours, not your agent's
+(`parley say` does the same from the command line). So that this means something, both refuse to run for an agent:
+without a terminal, or with the mark Claude Code puts on the commands its tools run. The view keeps its own
+connection to the room while it is open; it sends no "working" or "idle" of its own, and it does not wake your sessions or read your agent's inbox for it.
 
 ## When a message arrives
 

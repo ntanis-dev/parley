@@ -8,7 +8,14 @@ import { join } from "node:path";
 // either (they are written as \u escapes).
 const NON_ASCII = /[^\t\n\r\x20-\x7e]/;
 let bad = 0;
-for (const dir of ["src", "src/relay", "scripts", "test", "relay/cloudflare"]) {
+for (const dir of [
+  "src",
+  "src/relay",
+  "src/view",
+  "scripts",
+  "test",
+  "relay/cloudflare",
+]) {
   let files = [];
   try {
     files = await readdir(dir);

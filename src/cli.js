@@ -71,15 +71,11 @@ const yes = async (io, question) =>
 // plainly, in a red box, and confirmed by typing their name rather than "y".
 async function trust(io, name, paths) {
   const { readConfig } = await import("./config.js");
-  const work = readConfig(paths).autonomy === "work";
-  io.ui.danger(`you are about to trust ${name}`, [
-    `${name}'s agent will send messages that your Claude reads and acts on, also while you are away.`,
-    work
-      ? `With autonomy "work" (yours now), it can pull, resolve conflicts, edit project files, commit and push when ${name}'s agent asks.`
-      : `With autonomy "read" (yours now), it only reads and answers; \`parley autonomy work\` would let it change the project when asked.`,
-    "Parley keeps all of it to this project and never sends your secrets, but it cannot tell a wise request from a harmful one.",
-    `Only continue if you trust ${name} with this repository.`,
-  ]);
+  const { trustLines } = await import("./trust.js");
+  io.ui.danger(
+    `you are about to trust ${name}`,
+    trustLines(name, readConfig(paths).autonomy),
+  );
   const typed = await ask(io, `Type ${name} to confirm:`);
   return typed.trim().toLowerCase() === name.trim().toLowerCase();
 }
