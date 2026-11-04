@@ -225,9 +225,18 @@ export function decodeInvite(code) {
 
 // ---- Envelopes ---------------------------------------------------------------
 
-// The kinds this version sends and reads. presence (0.2) carries a member's
-// Parley version; versions before it drop it unread.
-export const KINDS = new Set(["join", "message", "diff", "note", "presence"]);
+// The kinds this version sends and reads; presence carries a member's
+// Parley version. A kind a version does not know becomes a notice there.
+export const KINDS = new Set([
+  "join",
+  "message",
+  "diff",
+  "note",
+  "presence",
+  "pulse",
+  "file",
+  "claim",
+]);
 const KIND_RE = /^[a-z][a-z0-9-]{0,31}$/;
 
 export class NewerFormat extends CryptoError {

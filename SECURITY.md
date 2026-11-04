@@ -4,13 +4,14 @@ Please report suspected vulnerabilities privately through GitHub's private vulne
 
 Include the affected version or commit, impact, reproduction conditions, and the smallest safe evidence needed to investigate. ntanis.dev will validate the report, coordinate a fix, and publish remediation information when users can act on it.
 
-Parley's whole job is to let two agents talk without either one leaking or taking over the other. These are exactly the reports we want:
+Parley's whole job is to let agents work together without any of them leaking or taking over another. These are exactly the reports we want:
 
 - anything that leaves a computer other than through Parley's gatekeeper, or that comes from outside the project folder (a path, a link, a junction, a stream name that gets past the checks);
-- a secret that the scanner lets through in a message, a note or a diff;
-- a member's message that makes the other agent act as if its own user had asked: edit files or run commands in a turn the message started, approve something, or turn Parley on;
+- a secret that the scanner lets through in a message, a note, a file, a diff or a commit;
+- a member's message that makes another agent do more than its person's autonomy setting allows in a turn the message started: run commands, edit outside the project or in `.git`, keys or environment files, force-push, commit secrets, approve someone, or reach anything outside Parley's watch and tools;
+- a file a member sends that gets written anywhere but where the receiving agent asked, inside the project;
 - a way to join a room from a folder that is not a copy of the room's repository;
 - anything that lets the relay, or someone holding a leaked invite, read a message, forge a member, or replay one;
-- a way for an agent to turn Parley on, approve a member, or join a room without its person.
+- a way for an agent to start Parley outside a `parley` session, approve a member, join a room, or send a message marked as typed by its person (`parley say`, `parley view`) without its person.
 
 Only the latest code on the default branch is supported during pre-release development.

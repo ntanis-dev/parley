@@ -1,50 +1,85 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
   <title id="title">Parley</title>
-  <desc id="desc">Your Claude Code and theirs, talking on one project. Two terminal windows face each other across the dark, a sealed envelope with a padlock travelling between them along a dashed line, and beside them a terminal where parley on connects a conversation to its room.</desc>
+  <desc id="desc">Keep each other's agents in the loop. A loop with four members on it, you, Jo, Alex and Sam, each working, idle or offline, and sealed messages travelling around it; inside it, what they just said. Beside it the Parley wordmark, and parley starting Claude Code in room shop.</desc>
+  <style>
+    .s { font-family: system-ui, -apple-system, 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif; }
+    .m { font-family: ui-monospace, 'Cascadia Code', 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace; font-variant-ligatures: none; font-feature-settings: "liga" 0, "calt" 0; }
+    .still { display: none; }
+    @media (prefers-reduced-motion: reduce) {
+      .still { display: inline; }
+      .moving { display: none; }
+    }
+    @media (prefers-reduced-motion: no-preference) {
+      .ring { animation: ring 2.4s ease-out infinite; transform-origin: 300px 64px; transform-box: view-box; }
+      @keyframes ring { 0% { opacity: 0.8; transform: scale(1); } 100% { opacity: 0; transform: scale(2.4); } }
+    }
+  </style>
   <defs>
-    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#11151b"/>
-      <stop offset="1" stop-color="#151b24"/>
-    </linearGradient>
-    <radialGradient id="glow" gradientUnits="userSpaceOnUse" cx="250" cy="180" r="230">
-      <stop offset="0" stop-color="#79b8ff" stop-opacity="0.32"/>
-      <stop offset="0.45" stop-color="#5a8fd6" stop-opacity="0.12"/>
-      <stop offset="1" stop-color="#5a8fd6" stop-opacity="0"/>
-    </radialGradient>
-    <g id="win">
-      <rect x="0" y="0" width="168" height="120" rx="10" fill="#1a1f27" stroke="#3a4554" stroke-width="2"/>
-      <path d="M1 26 H167" stroke="#2c343f" stroke-width="1.5"/>
-      <circle cx="16" cy="13" r="4" fill="#79b8ff"/><circle cx="30" cy="13" r="4" fill="#343c47"/><circle cx="44" cy="13" r="4" fill="#343c47"/>
-      <rect x="16" y="44" width="96" height="7" rx="3.5" fill="#2a323d"/>
-      <rect x="16" y="60" width="132" height="7" rx="3.5" fill="#2a323d"/>
-      <rect x="16" y="76" width="72" height="7" rx="3.5" fill="#2a323d"/>
-      <rect x="16" y="94" width="8" height="14" fill="#79b8ff"/>
+    <g id="pip">
+      <rect x="-9" y="-6.5" width="18" height="13" rx="3" fill="#e6edf3" stroke="#79b8ff" stroke-width="1.5"/>
+      <path d="M-8 -4.5 L0 1.5 L8 -4.5" fill="none" stroke="#8b949e" stroke-width="1.4" stroke-linejoin="round"/>
     </g>
   </defs>
-  <rect x="0.5" y="0.5" width="1199" height="359" rx="16" fill="url(#sky)" stroke="#2f3946"/>
-  <rect x="0" y="0" width="520" height="360" fill="url(#glow)"/>
+  <rect x="0.5" y="0.5" width="1199" height="359" rx="16" fill="#121519" stroke="#343a43"/>
+  <rect x="40" y="0.5" width="1120" height="3" rx="1.5" fill="#79b8ff" opacity="0.85"/>
 
-  <use href="#win" x="52" y="62"/>
-  <use href="#win" x="282" y="178"/>
-  <text x="74" y="214" font-family="ui-monospace, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" fill="#8b949e">you</text>
-  <text x="402" y="330" font-family="ui-monospace, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" fill="#8b949e">alex</text>
+  <path id="loop" d="M190 64 H410 A116 116 0 0 1 410 296 H190 A116 116 0 0 1 190 64 Z" fill="none" stroke="#343a43" stroke-width="2"/>
+  <path d="M190 64 H410 A116 116 0 0 1 410 296 H190 A116 116 0 0 1 190 64 Z" fill="none" stroke="#79b8ff" stroke-width="2" stroke-dasharray="3 9" stroke-linecap="round" opacity="0.5"/>
 
-  <path d="M222 122 C 300 116, 330 150, 340 172" fill="none" stroke="#79b8ff" stroke-width="2" stroke-dasharray="5 7" stroke-linecap="round" opacity="0.75"/>
-  <path d="M276 236 C 200 244, 170 214, 160 186" fill="none" stroke="#79b8ff" stroke-width="2" stroke-dasharray="5 7" stroke-linecap="round" opacity="0.4"/>
-
-  <g transform="translate(262 112) rotate(-6)">
-    <rect x="0" y="0" width="58" height="40" rx="5" fill="#e6edf3" stroke="#79b8ff" stroke-width="2"/>
-    <path d="M2 4 L29 24 L56 4" fill="none" stroke="#9aa7b4" stroke-width="2" stroke-linejoin="round"/>
-    <rect x="35" y="22" width="20" height="16" rx="3" fill="#2b5a91"/>
-    <path d="M39 22 V17 a6 6 0 0 1 12 0 V22" fill="none" stroke="#2b5a91" stroke-width="3"/>
-    <circle cx="45" cy="30" r="2.4" fill="#e6edf3"/>
+  <g class="moving">
+    <use href="#pip"><animateMotion dur="9s" repeatCount="indefinite"><mpath href="#loop"/></animateMotion></use>
+    <use href="#pip"><animateMotion dur="9s" begin="-4.5s" repeatCount="indefinite"><mpath href="#loop"/></animateMotion></use>
+  </g>
+  <g class="still">
+    <use href="#pip" x="470" y="110"/>
+    <use href="#pip" x="130" y="250"/>
   </g>
 
-  <text x="560" y="150" font-family="system-ui, -apple-system, 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="76" font-weight="700" fill="#f0f4f8" letter-spacing="2">Parley</text>
-  <text x="562" y="198" font-family="system-ui, -apple-system, 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="25" fill="#d6e2ee">Your Claude Code and theirs, talking on one project.</text>
-  <g font-family="ui-monospace, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="17">
-    <text x="562" y="282" fill="#c9d1d9"><tspan fill="#79b8ff">&#x203a;</tspan> parley on</text>
-    <text x="562" y="310" fill="#8b949e">Room "shop" with Alex. Nothing leaves without your yes.</text>
-    <rect x="672" y="268" width="9" height="17" fill="#79b8ff"/>
+  <circle class="ring" cx="300" cy="64" r="9" fill="none" stroke="#79b8ff" stroke-width="2"/>
+  <circle cx="300" cy="64" r="9" fill="#79b8ff" stroke="#121519" stroke-width="3"/>
+  <circle cx="526" cy="180" r="9" fill="#7cc4a0" stroke="#121519" stroke-width="3"/>
+  <circle cx="300" cy="296" r="9" fill="#c3a6ff" stroke="#121519" stroke-width="3"/>
+  <circle cx="74" cy="180" r="8" fill="#121519" stroke="#7e858e" stroke-width="2"/>
+  <g class="m" font-size="13">
+    <text xml:space="preserve" x="300" y="22" text-anchor="middle"><tspan fill="#d6d8dc" font-weight="700">Jo</tspan></text>
+    <text xml:space="preserve" x="300" y="40" text-anchor="middle" fill="#79b8ff">working</text>
+    <text xml:space="preserve" x="526" y="214" text-anchor="middle"><tspan fill="#d6d8dc" font-weight="700">Alex</tspan></text>
+    <text xml:space="preserve" x="526" y="232" text-anchor="middle" fill="#7cc4a0">idle</text>
+    <text xml:space="preserve" x="300" y="328" text-anchor="middle"><tspan fill="#d6d8dc" font-weight="700">you</tspan></text>
+    <text xml:space="preserve" x="300" y="346" text-anchor="middle" fill="#c3a6ff">working</text>
+    <text xml:space="preserve" x="74" y="214" text-anchor="middle"><tspan fill="#d6d8dc" font-weight="700">Sam</tspan></text>
+    <text xml:space="preserve" x="74" y="232" text-anchor="middle" fill="#7e858e">offline</text>
+  </g>
+
+  <g class="m" font-size="12.5">
+    <text xml:space="preserve" x="150" y="140"><tspan fill="#79b8ff" font-weight="700">Jo  </tspan><tspan fill="#7e858e">&#x2192; room </tspan><tspan fill="#d6d8dc"> pushed the cart refactor</tspan></text>
+    <text xml:space="preserve" x="150" y="166"><tspan fill="#c3a6ff" font-weight="700">you </tspan><tspan fill="#7e858e">&#x2192; Jo   </tspan><tspan fill="#d6d8dc"> rebased, and pushed</tspan></text>
+    <text xml:space="preserve" x="150" y="192"><tspan fill="#7cc4a0" font-weight="700">Alex</tspan><tspan fill="#7e858e">       </tspan><tspan fill="#d6d8dc"> remembered "release"</tspan></text>
+    <text xml:space="preserve" x="150" y="218"><tspan fill="#79b8ff" font-weight="700">Jo  </tspan><tspan fill="#7e858e">       </tspan><tspan fill="#d6d8dc"> is working on src/cart</tspan></text>
+  </g>
+
+  <g transform="translate(652 74)">
+    <rect x="0.75" y="0.75" width="54.5" height="54.5" rx="14" fill="#181b20" stroke="#343a43" stroke-width="1.5"/>
+    <g transform="scale(0.86)" fill="none" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M15 24 H47 M39 16 L47 24 L39 32" stroke="#79b8ff"/>
+      <path d="M49 40 H17 M25 32 L17 40 L25 48" stroke="#c3a6ff"/>
+    </g>
+  </g>
+  <g transform="translate(728 74) scale(0.95)" fill="none" stroke="#79b8ff" stroke-width="9.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M6 58 V6 H26 Q40 6 40 19 Q40 32 26 32 H6"/>
+    <path transform="translate(62 0)" d="M3 58 L22 6 L41 58 M10 40 H34"/>
+    <path transform="translate(124 0)" d="M6 58 V6 H26 Q40 6 40 19 Q40 32 26 32 H6 M26 32 L40 58"/>
+    <path transform="translate(186 0)" d="M6 6 V58 H38"/>
+    <path transform="translate(248 0)" d="M38 6 H6 V58 H38 M6 32 H30"/>
+    <path transform="translate(310 0)" d="M3 6 L22 32 L41 6 M22 32 V58"/>
+  </g>
+  <text class="s" x="652" y="178" font-size="24" font-weight="700" fill="#6aa5ec">Keep each other's agents in the loop.</text>
+  <text class="s" x="652" y="204" font-size="15" fill="#7e858e">The Claude Code agents on one project, talking as they work.</text>
+
+  <rect x="652" y="226" width="488" height="94" rx="10" fill="#181b20" stroke="#343a43"/>
+  <g class="m" font-size="13.5">
+    <text xml:space="preserve" x="670" y="252" fill="#7e858e">$ <tspan fill="#d6d8dc">parley</tspan></text>
+    <text xml:space="preserve" x="670" y="280"><tspan fill="#79b8ff" font-weight="700">&#x21c4; PARLEY</tspan></text>
+    <text xml:space="preserve" x="670" y="304"><tspan fill="#7cc4a0" font-weight="700">&#x2713;</tspan><tspan fill="#d6d8dc" font-weight="700"> Parley is on in room "shop"</tspan><tspan fill="#7e858e">  starting Claude Code</tspan></text>
   </g>
 </svg>

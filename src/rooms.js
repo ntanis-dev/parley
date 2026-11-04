@@ -21,7 +21,7 @@ import { roomDir } from "./paths.js";
 import { cleanLine } from "./inbound.js";
 import { recordMember, validPresence } from "./compat.js";
 import { UPDATE_HINT } from "./version.js";
-import { PATCH_MAX, TEXT_MAX, isInside } from "./egress.js";
+import { FILE_MAX, PATCH_MAX, TEXT_MAX, isInside } from "./egress.js";
 
 // Identities, rooms and what was said in them, all under ~/.parley.
 //
@@ -180,6 +180,30 @@ export const pendingMembers = (room) =>
     .filter(([, m]) => m.status === "pending")
     .map(([id, m]) => ({ id, ...m }));
 
+// Whether this person is in the room for the others too. Whoever opened it
+// is; someone who joined is once an approved member has written to them
+// (their presence, a message): nobody seals anything for someone they have
+// not let in.
+export function isWelcomed(paths, room) {
+  const joined = Object.values(room.members).some((m) => m.via === "invite");
+  if (!joined || room.welcomed) return true;
+  if (
+    Object.keys(room.versions?.members ?? {}).some(
+      (id) => room.members[id]?.status === "approved",
+    )
+  )
+    return true;
+  return readLog(paths, room.roomId).some((e) => !e.own);
+}
+
+// Marks the room as one this person was let into (see isWelcomed).
+export function markWelcomed(paths, roomId) {
+  if (!loadRoom(paths, roomId)?.welcomed)
+    updateRoom(paths, roomId, (fresh) => {
+      fresh.welcomed = true;
+    });
+}
+
 export function addMember(
   room,
   { sign, box, name },
@@ -311,10 +335,82 @@ const HEX_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 
 // A body as it may be kept, or null. Nothing a peer sends is trusted to have
 // the shape it should.
+const ID_RE = /^[A-Za-z0-9_-]{8,32}$/;
+const TOPIC_RE = /^[\p{L}\p{N}][\p{L}\p{N} ._/-]{0,59}$/u;
+// A project-relative path as a member may name it: no leading slash, no
+// backslash, colon or NUL, no ".." step.
+const isProjectPath = (p) =>
+  p.length > 0 &&
+  p.length <= 512 &&
+  !p.startsWith("/") &&
+  !/[\\:\x00]/.test(p) &&
+  !p.split("/").includes("..");
+
+// Who a message was for, when not the whole room: member ids.
+const audience = (body) =>
+  Array.isArray(body.to)
+    ? body.to
+        .filter((id) => typeof id === "string" && ID_RE.test(id))
+        .slice(0, 64)
+    : null;
+
 export function validBody(kind, body) {
   if (!body || typeof body !== "object") return null;
-  if (kind === "message" || kind === "note")
-    return isText(body.text, TEXT_MAX) ? { text: body.text } : null;
+  if (kind === "message") {
+    if (!isText(body.text, TEXT_MAX)) return null;
+    const to = audience(body);
+    return {
+      text: body.text,
+      ...(to?.length ? { to } : {}),
+      ...(ID_RE.test(body.replyTo ?? "") ? { replyTo: body.replyTo } : {}),
+      // Typed by the person themselves (parley say, parley view).
+      ...(body.human === true ? { human: true } : {}),
+    };
+  }
+  if (kind === "note") {
+    const topic = TOPIC_RE.test(body.topic ?? "") ? body.topic : undefined;
+    if (body.forgotten === true && topic)
+      return { topic, text: "", forgotten: true };
+    if (!isText(body.text, TEXT_MAX)) return null;
+    return { text: body.text, ...(topic ? { topic } : {}) };
+  }
+  if (kind === "claim") {
+    const paths = Array.isArray(body.paths)
+      ? body.paths
+          .filter(
+            (p) => typeof p === "string" && (p === "." || isProjectPath(p)),
+          )
+          .slice(0, 50)
+      : [];
+    if (!paths.length || !Number.isSafeInteger(body.until)) return null;
+    return {
+      paths,
+      until: body.until,
+      note: isText(body.note, 500) ? body.note : "",
+    };
+  }
+  if (kind === "file") {
+    if (
+      !isText(body.filename, 255) ||
+      /[\\/:\x00]/.test(body.filename) ||
+      typeof body.data !== "string" ||
+      !/^[A-Za-z0-9+/]*={0,2}$/.test(body.data) ||
+      !/^[0-9a-f]{64}$/.test(body.sha256 ?? "")
+    )
+      return null;
+    const size = Buffer.from(body.data, "base64").length;
+    if (size > FILE_MAX || size !== body.size) return null;
+    const to = audience(body);
+    return {
+      filename: body.filename,
+      size,
+      sha256: body.sha256,
+      data: body.data,
+      path: isText(body.path, 512) ? body.path : "",
+      note: isText(body.note, TEXT_MAX) ? body.note : "",
+      ...(to?.length ? { to } : {}),
+    };
+  }
   if (kind === "diff") {
     if (
       !isText(body.patch, PATCH_MAX + 1024) ||
@@ -402,6 +498,8 @@ export function receive(
   }
   if (member.status !== "approved") return { kind: "skip", why: member.status };
   if (head.kind === "join") return { kind: "skip", why: "announce" };
+  // Sealed for this person by someone approved: they let this person in.
+  if (opened.forMe) markWelcomed(paths, roomId);
   if (head.kind === "presence") {
     const presence = body === null ? null : validPresence(body);
     if (!presence) return { kind: "skip", why: "not for me" };
@@ -428,7 +526,9 @@ export function receive(
   if (!kept) return { kind: "skip", why: "not for me" };
   if (readLog(paths, roomId).some((e) => e.id === head.id))
     return { kind: "skip", why: "seen" };
+  // What was sent first: its fields never stand in for who sent it, or when.
   const entry = {
+    ...kept,
     id: head.id,
     c,
     relayAt: at,
@@ -437,7 +537,7 @@ export function receive(
     name: member.name,
     fingerprint: member.fingerprint,
     kind: head.kind,
-    ...kept,
+    keptAt: now,
   };
   appendLog(paths, roomId, entry);
   return { kind: "entry", entry };
@@ -445,11 +545,21 @@ export function receive(
 
 // The blob for `body`, sealed for every approved member, and the log entry to
 // keep once the relay has it.
-export function prepare(identity, room, kind, body = null, now = Date.now()) {
+// `only` (member ids) seals it for those members alone: a direct message.
+export function prepare(
+  identity,
+  room,
+  kind,
+  body = null,
+  now = Date.now(),
+  only = null,
+) {
   const recipients =
     kind === "join"
       ? []
-      : approvedMembers(room).map((m) => ({ id: m.id, box: m.box }));
+      : approvedMembers(room)
+          .filter((m) => !only || only.includes(m.id))
+          .map((m) => ({ id: m.id, box: m.box }));
   if (kind !== "join" && !recipients.length)
     throw new RoomError(
       "Nobody in this room is approved yet, so there is no one to send to.",
@@ -465,15 +575,17 @@ export function prepare(identity, room, kind, body = null, now = Date.now()) {
   });
   return {
     blob: sealOuter(key, roomId, envelope),
+    // The body first: its fields never stand in for who sent it, or when.
     entry: {
+      ...(body ?? {}),
       id: envelope.id,
       at: now,
+      keptAt: now,
       own: true,
       from: envelope.from,
       name: identity.name,
       kind,
       to: recipients.map((r) => r.id),
-      ...(body ?? {}),
     },
   };
 }

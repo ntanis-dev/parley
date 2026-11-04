@@ -7,8 +7,11 @@
 // Wire protocol, JSON text frames on a WebSocket at /v1/rooms/<room id>:
 //   client: { t: "hello", v, vmin, app, token, after, key? }   first, in 10 s
 //           { t: "post", id, blob }   { t: "sync", after }   { t: "ping" }
-//   relay:  { t: "ready", cursor, created, wire, relay: { app, wire } }
+//           { t: "pulse", blob }
+//   relay:  { t: "ready", cursor, created, wire,
+//             relay: { app, wire, features } }
 //           { t: "msg", c, at, blob }   { t: "ack", id, c, at }
+//           { t: "pulse", blob }
 //           { t: "synced", cursor, more }   { t: "pong" }
 //           { t: "error", code, message }  (it closes after a bad hello)
 // v and vmin are the wire versions the client speaks (version.js); the
@@ -16,15 +19,19 @@
 // "version" saying which side is behind. A frame the relay does not know
 // gets an "unknown-frame" error and the connection stays open, so newer
 // clients can try newer frames.
+// A pulse (who is around, working or idle; activity.js) goes to the members
+// connected at that moment and is not kept.
 // A room is created by the first hello that reaches it; from then on only
 // that token opens it. A host can require a relay key to create rooms.
 
 import { VERSION, WIRE, shared } from "../version.js";
 
 export const LIMITS = {
-  // One sealed message: a 256 KiB diff, sealed twice, in base64url.
-  blob: 448 * 1024,
-  frame: 460 * 1024,
+  // One sealed message: a 256 KiB diff or a 300 KiB file, sealed twice,
+  // in base64 (about 1.8 and 2.4 times the size). Under the 1 MiB a
+  // Cloudflare WebSocket message may be.
+  blob: 900 * 1024,
+  frame: 920 * 1024,
   // Bytes of backlog per batch; the client asks for the next one.
   batchBytes: 4 << 20,
   // What a room keeps, and for how long.
@@ -34,6 +41,8 @@ export const LIMITS = {
   // A room nobody opened for this long is forgotten.
   roomIdleMs: 90 * 24 * 60 * 60 * 1000,
   posts: { burst: 30, perMinute: 60 },
+  pulses: { burst: 6, perMinute: 12 },
+  pulseBlob: 4096,
   socketsPerRoom: 16,
   helloMs: 10_000,
 };
@@ -192,19 +201,23 @@ export class RoomStore {
   }
 }
 
-// Posts a connection may make: a burst, then a steady rate.
-export function takeToken(state, now) {
-  const { burst, perMinute } = LIMITS.posts;
-  const elapsed = Math.max(0, now - (state.bucketAt ?? now));
-  state.bucket = Math.min(
+// Posts (or pulses) a connection may make: a burst, then a steady rate.
+export function takeToken(state, now, kind = "posts") {
+  const { burst, perMinute } = LIMITS[kind];
+  const at = `${kind}At`;
+  const elapsed = Math.max(0, now - (state[at] ?? now));
+  state[kind] = Math.min(
     burst,
-    (state.bucket ?? burst) + (elapsed * perMinute) / 60_000,
+    (state[kind] ?? burst) + (elapsed * perMinute) / 60_000,
   );
-  state.bucketAt = now;
-  if (state.bucket < 1) return false;
-  state.bucket -= 1;
+  state[at] = now;
+  if (state[kind] < 1) return false;
+  state[kind] -= 1;
   return true;
 }
+
+// What this relay offers beyond the wire protocol.
+export const FEATURES = ["pulse"];
 
 function sendBatch(conn, store, after) {
   const { rows, more } = store.after(conn.state.roomId, after);
@@ -243,8 +256,8 @@ export async function onFrame(
       !TOKEN_RE.test(frame.token ?? "")
     )
       return refuse(conn, "bad-hello", "Say hello first.");
-    // The client speaks frame.v at most and frame.vmin at least (only v 1
-    // before 0.2). Refuse only when nothing is shared, saying who is behind.
+    // The client speaks frame.v at most and frame.vmin (or frame.v) at
+    // least. Refuse only when nothing is shared, saying who is behind.
     const client = {
       min: Number.isSafeInteger(frame.vmin) ? frame.vmin : frame.v,
       max: frame.v,
@@ -304,7 +317,7 @@ export async function onFrame(
       cursor: store.cursor(state.roomId),
       created,
       wire,
-      relay: { app: VERSION, wire: WIRE },
+      relay: { app: VERSION, wire: WIRE, features: FEATURES },
     });
     const after =
       Number.isSafeInteger(frame.after) && frame.after > 0 ? frame.after : 0;
@@ -346,6 +359,18 @@ export async function onFrame(
       for (const peer of peers())
         if (peer !== conn)
           peer.send({ t: "msg", c, at: now, blob: frame.blob });
+      return;
+    }
+    case "pulse": {
+      if (
+        typeof frame.blob !== "string" ||
+        !BLOB_RE.test(frame.blob) ||
+        frame.blob.length > LIMITS.pulseBlob ||
+        !takeToken(state, now, "pulses")
+      )
+        return;
+      for (const peer of peers())
+        if (peer !== conn) peer.send({ t: "pulse", blob: frame.blob });
       return;
     }
     default:

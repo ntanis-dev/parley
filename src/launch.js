@@ -3,32 +3,35 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, relative, resolve } from "node:path";
+import { parseClaudeArgs } from "./claude-args.js";
 import { resolveClaude } from "./claude-path.js";
 import { isInside } from "./egress.js";
-import { writeFileAtomic, writeJsonAtomic } from "./fsutil.js";
-import { installedEntry } from "./install.js";
+import { readJson, writeJsonAtomic } from "./fsutil.js";
 import { notices } from "./compat.js";
-import { loadRoom, projectFor } from "./rooms.js";
+import {
+  approvedMembers,
+  isWelcomed,
+  loadIdentity,
+  loadRoom,
+  pendingMembers,
+  projectFor,
+} from "./rooms.js";
+import { syncRoom } from "./ops.js";
+import { projectMismatch } from "./project.js";
 import { forward } from "./paths.js";
 import { launchFile, updateLaunch } from "./sessions.js";
 
-// `parley [claude arguments]`: Claude Code with Parley loaded, for this run
+// `parley [claude arguments]`: Claude Code with Parley on, for this run
 // only. Everything comes in on the command line, written for this launch
 // under ~/.parley/claude/<launch>/ and removed when claude exits:
-//   --settings      Parley's hooks (exec form: node + cli.js, no shell), and
-//                   rules that keep the agent's file tools out of ~/.parley
-//   --plugin-dir    a plugin with one command, /parley (on, off, status),
-//                   which only the person can run; the prompt hook handles
-//                   it before it expands
-//   --dangerously-load-development-channels server:parley
-//                   lets Parley's MCP server push messages into the session
-//                   (Claude Code asks you to confirm this when it starts;
-//                   channels are a research preview)
-// The MCP server is the one `parley install` added to Claude Code's user
-// configuration (install.js), which this launch wakes by setting
-// PARLEY_LAUNCH. Before that install the launch passes it with --mcp-config
-// instead: everything works but waking, since Claude Code takes a channel
-// server only from its own configuration.
+//   --settings      Parley's hooks (exec form: node + cli.js, no shell);
+//                   the status line, Parley's own row under the person's own
+//                   status line, which still runs as it did; a rule that
+//                   lets the agent run Parley's message watch without a
+//                   prompt; and rules that keep its file tools out of
+//                   ~/.parley
+//   --mcp-config    Parley's MCP server
+// Nothing is written to the project or to Claude Code's own settings.
 
 export class LaunchRefused extends Error {}
 
@@ -42,7 +45,7 @@ const REFUSED = [
 ];
 
 // Arguments Parley will not start claude with: bypassing permissions would
-// let a member's message act without asking, and channels need an
+// let a member's message act without asking, and the message watch needs an
 // interactive session.
 export function checkArgs(args) {
   for (let i = 0; i < args.length; i++) {
@@ -78,19 +81,34 @@ export function rulePath(dir, home = homedir()) {
     : `/${abs}`;
 }
 
-// The /parley command. The prompt hook blocks `/parley on` before it
-// expands, so this text reaches Claude only when Parley's hooks are not
-// running; it then just says so.
-const COMMAND = [
-  "---",
-  "description: Parley in this conversation - on, off or status",
-  'argument-hint: "on | off | status"',
-  "disable-model-invocation: true",
-  "---",
-  "",
-  "Parley's hooks did not handle this command, so Parley is not running in this session. Tell the user in one line to start Claude Code with `parley` (not `claude`) to use it here. Do nothing else.",
-  "",
-].join("\n");
+// A command line both Git Bash and PowerShell run (status lines and Monitor
+// commands go through a shell): an absolute node path cannot be quoted at
+// the start of a PowerShell command, so a node path with spaces becomes
+// `node` from PATH.
+export function nodeCommand(nodePath) {
+  const node = forward(nodePath);
+  return /\s/.test(node) ? "node" : node;
+}
+
+export const watchCommand = (nodePath, cliPath, launchId) =>
+  `${nodeCommand(nodePath)} "${forward(cliPath)}" watch --launch ${launchId}`;
+
+// The status line the person would have without Parley: the first of the
+// project's local settings, the project's settings and the user's settings
+// that sets one. Parley's status line runs it, as it is, above its own row.
+export function ownStatusLine({ cwd, env = process.env, home = homedir() }) {
+  const claudeDir = env.CLAUDE_CONFIG_DIR || join(home, ".claude");
+  for (const file of [
+    join(cwd, ".claude", "settings.local.json"),
+    join(cwd, ".claude", "settings.json"),
+    join(claudeDir, "settings.json"),
+  ]) {
+    const line = readJson(file)?.statusLine;
+    if (line?.type === "command" && typeof line.command === "string")
+      return { command: line.command, padding: line.padding ?? null };
+  }
+  return null;
+}
 
 export function launchFiles({
   paths,
@@ -98,7 +116,6 @@ export function launchFiles({
   nodePath = process.execPath,
   cliPath,
   env = process.env,
-  installed = false,
 }) {
   const dir = join(paths.claude, launchId);
   const hook = (event) => ({
@@ -108,67 +125,138 @@ export function launchFiles({
     timeout: 10,
   });
   const own = rulePath(paths.root);
+  const watch = watchCommand(nodePath, cliPath, launchId);
   const settings = {
     hooks: {
       SessionStart: [{ hooks: [hook("session-start")] }],
       UserPromptSubmit: [{ hooks: [hook("user-prompt")] }],
       PreToolUse: [{ matcher: "*", hooks: [hook("pre-tool-use")] }],
+      PostToolUse: [
+        { matcher: "mcp__parley__.*", hooks: [hook("post-tool-use")] },
+      ],
       Stop: [{ hooks: [hook("stop")] }],
       SessionEnd: [{ hooks: [hook("session-end")] }],
     },
+    statusLine: {
+      type: "command",
+      command: `${nodeCommand(nodePath)} "${forward(cliPath)}" statusline --launch ${launchId}`,
+      // Idle sessions get no events to refresh on; new messages should
+      // still show.
+      refreshInterval: 5,
+    },
     permissions: {
+      // The message watch, exactly as Parley's instructions give it.
+      allow: [`Bash(${watch})`],
       // Edit rules cover every file-editing tool (Write included); Claude
       // Code does not match Write(...) rules at all.
       deny: [`Read(${own}/**)`, `Edit(${own}/**)`],
     },
   };
-  const mcp = installed
-    ? null
-    : {
-        mcpServers: {
-          parley: {
-            type: "stdio",
-            command: forward(nodePath),
-            args: [forward(cliPath), "mcp", "--launch", launchId],
-            env: env.PARLEY_HOME ? { PARLEY_HOME: env.PARLEY_HOME } : {},
-          },
-        },
-      };
-  const plugin = join(dir, "plugin");
+  const mcp = {
+    mcpServers: {
+      parley: {
+        type: "stdio",
+        command: forward(nodePath),
+        args: [forward(cliPath), "mcp", "--launch", launchId],
+        env: env.PARLEY_HOME ? { PARLEY_HOME: env.PARLEY_HOME } : {},
+      },
+    },
+  };
   return {
     dir,
     settingsFile: join(dir, "settings.json"),
-    mcpFile: mcp ? join(dir, "mcp.json") : null,
-    pluginDir: plugin,
+    mcpFile: join(dir, "mcp.json"),
     settings,
     mcp,
-    pluginFiles: {
-      [join(plugin, ".claude-plugin", "plugin.json")]:
-        JSON.stringify(
-          {
-            name: "parley",
-            description: "The /parley command of a parley launch",
-            version: "0.1.0",
-          },
-          null,
-          2,
-        ) + "\n",
-      [join(plugin, "commands", "parley.md")]: COMMAND,
-    },
+    watch,
   };
 }
 
+// What Claude is asked first in a launch that does not start with a prompt
+// of the person's own: arm the message watch, and keep it armed. (With a
+// prompt of theirs, the prompt hook asks the same, and the Stop hook makes
+// sure of it at the end of every turn.)
+export const openingPrompt = (watch) =>
+  `Parley is on in this session. Before anything else, arm Parley's message watch: the Monitor tool with command: ${watch}, description: "Parley messages", timeout_ms: 1800000 (load Monitor with ToolSearch if it is not loaded; use exactly that command). Keep it armed for the whole session: whenever it ends or expires, arm it again the same way. Then say in one short line that Parley is listening, and wait for me.`;
+
+// The person's arguments first (so a prompt of theirs is not read as a value
+// of --mcp-config, which takes several), then Parley's. A launch without a
+// prompt of its own starts with the opening prompt.
 export function claudeArgs(files, args) {
+  const parsed = parseClaudeArgs(args);
+  const opening =
+    parsed.interactive && !parsed.positionals.length
+      ? [openingPrompt(files.watch)]
+      : [];
   return [
+    ...opening,
+    ...args,
     "--settings",
     files.settingsFile,
-    ...(files.mcpFile ? ["--mcp-config", files.mcpFile] : []),
-    "--plugin-dir",
-    files.pluginDir,
-    "--dangerously-load-development-channels",
-    "server:parley",
-    ...args,
+    "--mcp-config",
+    files.mcpFile,
   ];
+}
+
+// Whether Parley can work in `cwd` at all: keys set up, the folder in a room,
+// and the folder a copy of the room's repository. Otherwise there is nothing
+// for a `parley` session to do, and it does not start (plain `claude` does).
+export function checkFolder({ paths, cwd }) {
+  if (!loadIdentity(paths))
+    throw new LaunchRefused(
+      "Parley is not set up on this computer: run `parley setup` first (or start plain `claude`).",
+    );
+  const project = projectFor(paths, cwd);
+  const room = project && loadRoom(paths, project.roomId);
+  if (!room)
+    throw new LaunchRefused(
+      "This folder is not in a Parley room: open one with `parley create`, join one with `parley join <invite>`, or start plain `claude` here.",
+    );
+  const mismatch = projectMismatch(project.root, {
+    tags: room.tags ?? [],
+    secret: Buffer.from(room.secret, "base64url"),
+    who: `room "${room.name}"`,
+  });
+  if (mismatch)
+    throw new LaunchRefused(`Parley does not start here. ${mismatch}`);
+  return { room, root: project.root };
+}
+
+// Whether anyone in the room can hear this person: someone else is in it,
+// and, for someone who joined, the others let them in.
+export function checkMembership(paths, room) {
+  const approved = approvedMembers(room);
+  const pending = pendingMembers(room);
+  if (!approved.length)
+    throw new LaunchRefused(
+      pending.length
+        ? `${pending.map((m) => `${m.name} (${m.fingerprint})`).join(", ")} asked to join "${room.name}": let them in with \`parley approve\` first, after comparing fingerprints.`
+        : `Nobody else is in room "${room.name}" yet: send the invite (\`parley invite\`), and let them in with \`parley approve\` once they join.`,
+    );
+  if (!isWelcomed(paths, room)) {
+    const by =
+      approved.find((m) => m.via === "invite")?.name ?? approved[0].name;
+    throw new LaunchRefused(
+      `${by} has not let you into "${room.name}" yet: ask them to run \`parley approve\`, and compare fingerprints.`,
+    );
+  }
+}
+
+// The room as the relay has it right now, ready for a session, or a refusal
+// that says what to do first: a session that cannot reach the relay, or that
+// nobody in the room can hear, does not start.
+export async function readyToLaunch({ paths, cwd, timeoutMs = 10_000 }) {
+  const { room } = checkFolder({ paths, cwd });
+  let fresh;
+  try {
+    fresh = await syncRoom(paths, loadIdentity(paths), room, { timeoutMs });
+  } catch (error) {
+    throw new LaunchRefused(
+      `Parley does not start: ${error.message} Check the relay, or start plain \`claude\`.`,
+    );
+  }
+  checkMembership(paths, fresh);
+  return { room: fresh };
 }
 
 export async function launch({
@@ -178,37 +266,33 @@ export async function launch({
   env = process.env,
   cliPath,
   stderr = process.stderr,
+  ui = null,
 }) {
   checkArgs(args);
+  const say = (text) =>
+    ui ? ui.warn(text) : stderr.write(`parley: ${text}\n`);
+  const { room } = await readyToLaunch({ paths, cwd });
   const claude = resolveClaude({ env, home: paths.home });
-  const launchId = randomBytes(12).toString("base64url");
-  const installed = Boolean(installedEntry({ env, home: paths.home }));
-  // What the room last said about versions (no network here).
-  try {
-    const project = projectFor(paths, cwd);
-    const room = project && loadRoom(paths, project.roomId);
-    if (room)
-      for (const line of notices(room))
-        stderr.write(`parley: ${line}
-`);
-  } catch (error) {
-    stderr.write(`parley: ${error.message}
-`);
-  }
-  if (!installed)
-    stderr.write(
-      "parley: run `parley install` once so new messages can wake this session; until then Claude reads them when it checks the inbox.\n",
+  ui?.ok(`Parley is on in room "${room.name}"`, "starting Claude Code");
+  for (const m of pendingMembers(room))
+    say(
+      `${m.name} (${m.fingerprint}) is waiting to be let in: \`parley approve\`.`,
     );
-  const files = launchFiles({ paths, launchId, cliPath, env, installed });
+  // What the room last said about versions (no network here).
+  for (const line of notices(room)) say(line);
+  // The document ends here: Claude Code has the terminal from now on.
+  ui?.end();
+  const launchId = randomBytes(12).toString("base64url");
+  const files = launchFiles({ paths, launchId, cliPath, env });
   mkdirSync(files.dir, { recursive: true });
   writeJsonAtomic(files.settingsFile, files.settings);
-  if (files.mcp) writeJsonAtomic(files.mcpFile, files.mcp);
-  for (const [file, text] of Object.entries(files.pluginFiles))
-    writeFileAtomic(file, text);
+  writeJsonAtomic(files.mcpFile, files.mcp);
   updateLaunch(paths, launchId, (l) => {
     l.pid = process.pid;
     l.cwd = cwd;
     l.started = Date.now();
+    l.watchCommand = files.watch;
+    l.ownStatusLine = ownStatusLine({ cwd, env, home: paths.home });
   });
   const cleanup = () => {
     rmSync(files.dir, { recursive: true, force: true });
@@ -224,7 +308,7 @@ export async function launch({
         [...claude.prefix, ...claudeArgs(files, args)],
         {
           cwd,
-          env: { ...env, PARLEY_LAUNCH: launchId },
+          env,
           stdio: "inherit",
           windowsHide: false,
         },

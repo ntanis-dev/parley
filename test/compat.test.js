@@ -2,7 +2,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { WebSocketServer } from "ws";
 import {
   KINDS,
   memberId,
@@ -11,7 +10,6 @@ import {
   sealEnvelope,
   sealOuter,
 } from "../src/crypto.js";
-import { RoomConnection } from "../src/client.js";
 import { startRelay } from "../src/relay/server.js";
 import { VERSION, WIRE, compareVersions, shared } from "../src/version.js";
 import { markAnnounced, notices, presenceDue } from "../src/compat.js";
@@ -67,7 +65,11 @@ test("the relay settles on a shared protocol, or says who is behind", async (t) 
   });
   const ready = newer.frames.find((f) => f.t === "ready");
   assert.equal(ready.wire, WIRE.max);
-  assert.deepEqual(ready.relay, { app: VERSION, wire: WIRE });
+  assert.deepEqual(ready.relay, {
+    app: VERSION,
+    wire: WIRE,
+    features: ["pulse"],
+  });
   // A frame this relay does not know: an error, and the socket stays open.
   newer.ws.send(JSON.stringify({ t: "claim", path: "src" }));
   newer.ws.send(JSON.stringify({ t: "ping" }));
@@ -90,48 +92,6 @@ test("the relay settles on a shared protocol, or says who is behind", async (t) 
     behind.frames.find((f) => f.t === "error").message,
     /needs a newer Parley/,
   );
-});
-
-test("a relay from before 0.2 still works, and counts as older", async (t) => {
-  // What the 0.1 relay did: hello v 1 or nothing, and a ready that says
-  // nothing about itself.
-  const wss = new WebSocketServer({ port: 0 });
-  t.after(() => wss.close());
-  wss.on("connection", (ws) =>
-    ws.on("message", (data) => {
-      const frame = JSON.parse(data);
-      if (frame.t === "hello" && frame.v !== 1) {
-        ws.send(
-          JSON.stringify({
-            t: "error",
-            code: "bad-hello",
-            message: "Say hello first.",
-          }),
-        );
-        return ws.close(1008, "bad-hello");
-      }
-      if (frame.t === "hello") {
-        ws.send(JSON.stringify({ t: "ready", cursor: 0, created: true }));
-        ws.send(JSON.stringify({ t: "synced", cursor: 0, more: false }));
-      }
-    }),
-  );
-  const { roomId, token } = roomKeys(newRoomSecret());
-  const conn = new RoomConnection({
-    relay: `ws://127.0.0.1:${wss.address().port}`,
-    roomId,
-    token,
-    onMessage: () => {},
-  });
-  // As a future client would: speak v2 first, fall back to what it still can.
-  conn.helloV = WIRE.min + 1;
-  conn.start();
-  t.after(() => conn.stop());
-  await until(() => conn.state === "connected", { timeoutMs: 15_000 });
-  assert.equal(conn.helloV, WIRE.min);
-  assert.deepEqual(conn.relay, { app: null, wire: { min: 1, max: 1 } });
-  const room = { members: {}, versions: { relay: { app: null } } };
-  assert.match(notices(room)[0], /older than 0\.2\.0.*its host can update it/);
 });
 
 // Bob's view of a room where Alice is approved, and blobs from Alice.

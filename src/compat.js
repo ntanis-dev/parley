@@ -10,8 +10,7 @@ import {
 import { KINDS } from "./crypto.js";
 
 // What the room knows about the versions around it, kept in room.json:
-//   versions.relay           { app, wire, at }: app null for a relay from
-//                            before 0.2, which does not say
+//   versions.relay           { app, wire, at }
 //   versions.members[id]     { app, envelope, at, unknownKinds, newerFormat }
 //                            from their presence messages, and from what
 //                            they sent that this version could not read
@@ -75,13 +74,9 @@ export function recordMember(room, id, change) {
 export function notices(room) {
   const out = [];
   const relay = room.versions?.relay;
-  if (relay) {
-    const order = relay.app ? compareVersions(relay.app, VERSION) : -1;
-    if (!relay.app)
-      out.push(
-        `The relay runs a Parley older than 0.2.0 (it does not say which); everything works, and its host can update it.`,
-      );
-    else if (order < 0)
+  if (relay?.app) {
+    const order = compareVersions(relay.app, VERSION);
+    if (order < 0)
       out.push(
         `The relay runs Parley ${relay.app}, older than yours (${VERSION}); everything works, and its host can update it.`,
       );

@@ -1,15 +1,20 @@
 #!/usr/bin/env node
-import { readFileSync, readdirSync, realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { pathsFor } from "./paths.js";
 import { VERSION } from "./version.js";
+import { printer, s, wrapLine } from "./ui.js";
 
-// parley: one command for the person, the hooks and the MCP server. The
+// parley: one command for the person, the hooks and the MCP server. What
+// the person reads is one document per command, drawn by ui.js:
+// Parley's mark, then what happened, facts in a column,
+// sections under ruled headings, the next step; plain lines in a pipe. The
 // commands that decide who is trusted (setup, create, join, approve, block,
-// leave) need a person at a terminal: they ask, and refuse without one, so
-// an agent running them through its shell gets nowhere.
+// leave) and the ones that speak as the person (say, view) need a person at
+// a terminal: they ask, and refuse without one, so an agent running them
+// through its shell gets nowhere.
 
 const CLI_PATH = fileURLToPath(import.meta.url);
 
@@ -36,23 +41,54 @@ const parseJson = (text) => {
   }
 };
 
-const interactive = (io) => Boolean(io.stdin.isTTY && io.stdout.isTTY);
+// A person at a terminal, not an agent: Claude Code marks the commands its
+// tools run with CLAUDECODE, and an agent's shell has no terminal (one it
+// makes up, with script or winpty, still carries the mark).
+const interactive = (io) =>
+  Boolean(io.stdin.isTTY && io.stdout.isTTY && !io.env?.CLAUDECODE);
+const NEEDS_PERSON =
+  "This needs a person at a terminal: run it yourself, not through an agent or a pipe.";
 
-async function ask(io, question) {
-  if (!interactive(io))
-    throw new Failure(
-      "This needs a person at a terminal: run it yourself, not through an agent or a pipe.",
-    );
+function needPerson(io) {
+  if (!interactive(io)) throw new Failure(NEEDS_PERSON);
+}
+
+// A question in the command's document; the answer, trimmed.
+async function ask(io, question, hint = "") {
+  needPerson(io);
   const rl = createInterface({ input: io.stdin, output: io.stdout });
   try {
-    return (await rl.question(question)).trim();
+    return (await rl.question(io.ui.prompt(question, hint))).trim();
   } finally {
     rl.close();
   }
 }
 
 const yes = async (io, question) =>
-  /^(y|yes)$/i.test(await ask(io, `${question} [y/N] `));
+  /^(y|yes)$/i.test(await ask(io, question, "[y/N]"));
+
+// Letting someone into a room is letting their agent ask yours to act. Said
+// plainly, in a red box, and confirmed by typing their name rather than "y".
+async function trust(io, name, paths) {
+  const { readConfig } = await import("./config.js");
+  const work = readConfig(paths).autonomy === "work";
+  io.ui.danger(`you are about to trust ${name}`, [
+    `${name}'s agent will send messages that your Claude reads and acts on, also while you are away.`,
+    work
+      ? `With autonomy "work" (yours now), it can pull, resolve conflicts, edit project files, commit and push when ${name}'s agent asks.`
+      : `With autonomy "read" (yours now), it only reads and answers; \`parley autonomy work\` would let it change the project when asked.`,
+    "Parley keeps all of it to this project and never sends your secrets, but it cannot tell a wise request from a harmful one.",
+    `Only continue if you trust ${name} with this repository.`,
+  ]);
+  const typed = await ask(io, `Type ${name} to confirm:`);
+  return typed.trim().toLowerCase() === name.trim().toLowerCase();
+}
+
+const DISCLAIMER = [
+  "Parley is an independent project, not affiliated with, endorsed by, or sponsored by Anthropic.",
+  "It lets other people's agents send messages your Claude Code acts on, and lets yours act on theirs. You decide who is in your rooms and what their requests may do (`parley autonomy`).",
+  "It is provided as is, without warranty; you are responsible for how you use it and for your Claude Code use under Anthropic's terms.",
+];
 
 async function needIdentity(paths) {
   const { loadIdentity } = await import("./rooms.js");
@@ -86,60 +122,109 @@ async function rootOf(cwd) {
   );
 }
 
-const memberLines = (room) =>
-  Object.entries(room.members).map(
-    ([, m]) => `  ${m.status.padEnd(8)} ${m.name.padEnd(20)} ${m.fingerprint}`,
+const fingerprintOf = async (keys) =>
+  (await import("./crypto.js")).fingerprint(
+    keys.sign.pub ?? keys.sign,
+    keys.box.pub ?? keys.box,
   );
+
+// A path as the person reads it: the home folder as ~, forward slashes.
+function tildify(path, home) {
+  const norm = (p) => String(p).replace(/\\/g, "/");
+  const a = norm(path);
+  const h = norm(home).replace(/\/$/, "");
+  return a.toLowerCase() === h.toLowerCase()
+    ? "~"
+    : a.toLowerCase().startsWith(`${h.toLowerCase()}/`)
+      ? `~${a.slice(h.length)}`
+      : a;
+}
+
+const hostOf = (url) => {
+  try {
+    return new URL(url).host;
+  } catch {
+    return String(url);
+  }
+};
+
+const when = (iso) =>
+  new Date(iso).toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+// "Next  parley approve": a command to run, in the accent colour.
+const command = (ui, label, text) => ui.fact(label, [s(text, "accent bold")]);
 
 // ---- Commands --------------------------------------------------------------
 
 const COMMANDS = {
   async setup({ values, paths, io }) {
     const { loadIdentity, createIdentity } = await import("./rooms.js");
-    const { fingerprint } = await import("./crypto.js");
-    if (!interactive(io))
-      throw new Failure(
-        "This needs a person at a terminal: run it yourself, not through an agent or a pipe.",
-      );
+    const ui = io.ui;
+    needPerson(io);
     const existing = loadIdentity(paths);
     if (existing && !values["new-keys"]) {
-      io.out(
-        `Parley is set up: you are ${existing.name}, fingerprint ${fingerprint(existing.sign.pub, existing.box.pub)}.`,
-      );
+      ui.ok(`You are set up as ${existing.name}`);
+      ui.blank();
+      ui.fact("Fingerprint", await fingerprintOf(existing), "accent bold");
+      ui.fact("New keys", [s("parley setup --new-keys", "accent")]);
       return 0;
     }
-    if (
-      existing &&
-      !(await yes(
-        io,
-        "Make new keys? Every room will see you as someone new, and members must approve you again.",
-      ))
-    )
-      return 1;
+    if (existing) {
+      ui.warn(
+        "New keys make you someone new to every room: its members must approve you again.",
+      );
+      ui.blank();
+      if (!(await yes(io, "Make new keys?"))) {
+        ui.blank();
+        ui.skip("Kept your keys.");
+        return 1;
+      }
+    } else {
+      ui.full();
+      ui.heading("Welcome", `version ${VERSION}`);
+      for (const paragraph of DISCLAIMER) {
+        ui.paragraph(paragraph);
+        ui.blank();
+      }
+      if (!(await yes(io, "Understood, and set Parley up?"))) {
+        ui.blank();
+        ui.skip("Not set up.");
+        return 1;
+      }
+    }
     const name =
       values.name ||
-      (await ask(io, "Your name, as the other members will see it: "));
+      (await ask(io, "Your name, as the other members will see it:"));
     if (!name) throw new UsageError("A name is needed.");
     const identity = createIdentity(paths, name);
-    io.out(
-      `You are ${identity.name}. Your fingerprint: ${fingerprint(identity.sign.pub, identity.box.pub)}`,
+    ui.blank();
+    ui.ok(`You are ${identity.name}`);
+    ui.blank();
+    ui.fact("Fingerprint", await fingerprintOf(identity), "accent bold");
+    ui.blank();
+    ui.paragraph(
+      "Read your fingerprint to the people you work with when they join, so each of you knows the keys are right.",
     );
-    io.out(
-      "Read it to the people you work with when they join, so each of you knows the keys are right.",
-    );
+    ui.blank();
+    command(ui, "Open a room", "parley create --relay <address>");
+    command(ui, "Or join one", "parley join <invite>");
     return 0;
   },
 
   async create({ values, paths, io, cwd }) {
     const identity = await needIdentity(paths);
     const { createRoom } = await import("./ops.js");
-    if (!interactive(io))
-      throw new Failure(
-        "This needs a person at a terminal: run it yourself, not through an agent or a pipe.",
-      );
+    const ui = io.ui;
+    needPerson(io);
     const root = await rootOf(cwd);
-    const relay =
-      values.relay || (await ask(io, "Relay address (wss://...): "));
+    const relay = values.relay || (await ask(io, "Relay address:", "wss://"));
     const { room, invite, checked } = await createRoom({
       paths,
       identity,
@@ -148,50 +233,68 @@ const COMMANDS = {
       relayKey: values["relay-key"] ?? "",
       name: values.name || root.split(/[\\/]/).pop(),
     });
-    io.out(`Opened room "${room.name}" for ${root}.`);
-    if (!checked)
-      io.out(
-        "This folder has no commits yet, so Parley cannot check that the others join from the same project. Commit once and open the room again to have it checked.",
-      );
-    io.out(
-      `\nGive this invite to the people who should join, over a channel you trust (it lets them ask to join; you still approve each one):\n\n${invite}\n`,
+    ui.blank();
+    ui.ok(`Opened room "${room.name}"`);
+    ui.blank();
+    ui.fact("Folder", tildify(root, paths.home));
+    ui.fact("Relay", hostOf(room.relay));
+    ui.fact(
+      "Repository",
+      checked
+        ? "only copies of it can join"
+        : "not checked: no commits yet (commit, then open the room again)",
+      checked ? "" : "warn",
     );
-    io.out(
-      "When they have joined, run `parley approve` and compare fingerprints with them.",
+    ui.heading("Invite");
+    ui.paragraph(
+      "Give it to the people who should join, over a channel you trust. It lets them ask to join; you still let each one in.",
     );
+    ui.blank();
+    ui.code(invite);
+    ui.blank();
+    ui.next("parley approve", "once they have joined");
     return 0;
   },
 
   async invite({ paths, io, cwd }) {
     const identity = await needIdentity(paths);
     const room = await hereRoom(paths, cwd);
-    if (!interactive(io))
-      throw new Failure("This needs a person at a terminal.");
+    needPerson(io);
     const { inviteFor } = await import("./ops.js");
-    io.out(inviteFor(room, identity));
+    const ui = io.ui;
+    ui.heading("Invite", `room "${room.name}"`);
+    ui.paragraph(
+      "Give it to the people who should join, over a channel you trust. It lets them ask to join; you still let each one in.",
+    );
+    ui.blank();
+    ui.code(inviteFor(room, identity));
+    ui.blank();
+    ui.next("parley approve", "once they have joined");
     return 0;
   },
 
   async join({ positionals, values, paths, io, cwd }) {
     const identity = await needIdentity(paths);
     const { readInvite, joinRoom } = await import("./ops.js");
-    const { fingerprint } = await import("./crypto.js");
-    const code = positionals[0] || (await ask(io, "Invite: "));
+    const ui = io.ui;
+    const code = positionals[0] || (await ask(io, "Invite:"));
     const invite = readInvite(code, identity);
     const root = await rootOf(cwd);
-    io.out(
-      `This invite is from ${invite.by.name}, fingerprint ${fingerprint(invite.by.sign, invite.by.box)}.`,
-    );
-    io.out(
-      `It joins ${root} to room "${invite.room}" on ${new URL(invite.relay).host}.`,
-    );
+    const by = invite.by.name;
+    ui.heading("Join", `room "${invite.room}"`);
+    ui.fact("From", by, "bold");
+    ui.fact("Fingerprint", await fingerprintOf(invite.by), "accent bold");
+    ui.fact("Folder", tildify(root, paths.home));
+    ui.fact("Relay", hostOf(invite.relay));
+    ui.blank();
     if (
-      !(await yes(
-        io,
-        `Is that ${invite.by.name}'s fingerprint (check it with them)? Join?`,
-      ))
-    )
+      !(await yes(io, `Is that ${by}'s fingerprint (check it with them)?`)) ||
+      !(await trust(io, by, paths))
+    ) {
+      ui.blank();
+      ui.skip("Not joined.");
       return 1;
+    }
     const room = await joinRoom({
       paths,
       identity,
@@ -199,12 +302,19 @@ const COMMANDS = {
       invite,
       relayKey: values["relay-key"] ?? "",
     });
-    io.out(
-      `Joined "${room.name}". ${invite.by.name} now has to approve you; your fingerprint is ${fingerprint(identity.sign.pub, identity.box.pub)}.`,
+    ui.blank();
+    ui.ok(`Joined "${room.name}"`, `${by} lets you in next`);
+    ui.blank();
+    ui.fact("You", [
+      s(identity.name, "bold"),
+      s(`  ${await fingerprintOf(identity)}`, "accent bold"),
+    ]);
+    ui.blank();
+    ui.paragraph(
+      `${by} lets you in with \`parley approve\`: read them your fingerprint, so they know it is you.`,
     );
-    io.out(
-      "Then start Claude Code with `parley` here and type `/parley on` in the conversation.",
-    );
+    ui.blank();
+    ui.next("parley", `in this folder, once ${by} lets you in`);
     return 0;
   },
 
@@ -212,32 +322,42 @@ const COMMANDS = {
     const identity = await needIdentity(paths);
     const { syncRoom, setMemberStatus } = await import("./ops.js");
     const { findMember, pendingMembers } = await import("./rooms.js");
+    const ui = io.ui;
     let room = await hereRoom(paths, cwd);
-    if (!interactive(io))
-      throw new Failure("This needs a person at a terminal.");
+    needPerson(io);
     room = await syncRoom(paths, identity, room);
     const pending = positionals[0]
       ? [findMember(room, positionals[0])].filter(Boolean)
       : pendingMembers(room);
     if (!pending.length) {
-      io.out(
-        positionals[0]
-          ? `No member matches "${positionals[0]}".`
-          : "Nobody is waiting to be approved.",
-      );
-      return positionals[0] ? 1 : 0;
+      if (positionals[0])
+        throw new Failure(
+          `No member of "${room.name}" matches "${positionals[0]}".`,
+        );
+      ui.skip(`Nobody is waiting to be let into "${room.name}".`);
+      return 0;
     }
+    let approved = 0;
     for (const member of pending) {
-      io.out(
-        `${member.name} wants in, fingerprint ${member.fingerprint} (${member.via}, ${member.since}).`,
+      ui.heading("Approve", `room "${room.name}"`);
+      ui.fact("Name", member.name, "bold");
+      ui.fact("Fingerprint", member.fingerprint, "accent bold");
+      ui.fact(
+        "Asked",
+        `${when(member.since)}${member.via === "invite" ? ", with your invite" : ""}`,
       );
+      ui.blank();
       if (
         !(await yes(
           io,
           `Did ${member.name} read you that same fingerprint? Approve?`,
-        ))
-      )
+        )) ||
+        !(await trust(io, member.name, paths))
+      ) {
+        ui.blank();
+        ui.skip(`${member.name} is still waiting.`);
         continue;
+      }
       const { announced, error } = await setMemberStatus({
         paths,
         identity,
@@ -245,28 +365,40 @@ const COMMANDS = {
         id: member.id,
         status: "approved",
       });
-      io.out(
-        `Approved ${member.name}.${announced ? "" : ` (Could not tell the room yet: ${error}. It will learn when you next write.)`}`,
-      );
+      approved++;
+      ui.blank();
+      ui.ok(`${member.name} is in`);
+      if (!announced)
+        ui.warn(
+          `Could not tell the room yet (${error}); it learns when you next write.`,
+        );
     }
-    return 0;
+    return approved ? 0 : 1;
   },
 
   async block({ positionals, paths, io, cwd }) {
     const identity = await needIdentity(paths);
     const { setMemberStatus } = await import("./ops.js");
     const { findMember } = await import("./rooms.js");
+    const ui = io.ui;
     const room = await hereRoom(paths, cwd);
     const member = findMember(room, positionals[0]);
     if (!member)
       throw new UsageError(`No member matches "${positionals[0] ?? ""}".`);
+    ui.heading("Block", `room "${room.name}"`);
+    ui.fact("Name", member.name, "bold");
+    ui.fact("Fingerprint", member.fingerprint, "muted");
+    ui.blank();
     if (
       !(await yes(
         io,
-        `Block ${member.name} (${member.fingerprint})? Nothing more is sent to or read from them.`,
+        `Block ${member.name}? Nothing more is sent to or read from them.`,
       ))
-    )
+    ) {
+      ui.blank();
+      ui.skip(`${member.name} is not blocked.`);
       return 1;
+    }
     await setMemberStatus({
       paths,
       identity,
@@ -274,73 +406,203 @@ const COMMANDS = {
       id: member.id,
       status: "blocked",
     });
-    io.out(`Blocked ${member.name}.`);
+    ui.blank();
+    ui.ok(`Blocked ${member.name}`);
     return 0;
   },
 
   async status({ paths, io, cwd, values }) {
     const { loadIdentity, projectFor, loadRoom } = await import("./rooms.js");
-    const { fingerprint } = await import("./crypto.js");
-    const { readdirSafe, sessionsOn } = helpers;
+    const { activityText, memberActivity } = await import("./activity.js");
+    const { activeClaims, describeClaim, sharedMemory } =
+      await import("./memory.js");
+    const { memberVersions, notices } = await import("./compat.js");
+    const { readConfig } = await import("./config.js");
+    const { runningLaunches } = await import("./sessions.js");
+    const ui = io.ui;
+    const g = ui.term.g;
     const identity = loadIdentity(paths);
-    io.out(
-      identity
-        ? `You are ${identity.name}, fingerprint ${fingerprint(identity.sign.pub, identity.box.pub)}.`
-        : "Not set up: run `parley setup`.",
-    );
+    if (!identity) {
+      ui.skip("Parley is not set up on this computer.");
+      ui.blank();
+      ui.next("parley setup");
+      return 0;
+    }
+    const you = [
+      s(identity.name, "bold"),
+      s(`  ${await fingerprintOf(identity)}`, "muted"),
+    ];
     const project = projectFor(paths, cwd);
     let room = project && loadRoom(paths, project.roomId);
     if (!room) {
-      io.out("This folder is not in a room.");
+      ui.fact("You", you);
+      ui.blank();
+      ui.skip("This folder is not in a room.");
+      ui.blank();
+      command(ui, "Open one", "parley create --relay <address>");
+      command(ui, "Join one", "parley join <invite>");
       return 0;
     }
-    if (identity && !values.offline) {
+    let relayNote = values.offline ? "not asked (--offline)" : "reached";
+    let reached = true;
+    if (!values.offline) {
       const { syncRoom } = await import("./ops.js");
       try {
         room = await syncRoom(paths, identity, room);
       } catch (error) {
-        io.out(`(The relay did not answer: ${error.message})`);
+        reached = false;
+        relayNote = `did not answer: ${error.message}`;
       }
     }
-    io.out(`Room "${room.name}" for ${room.project}, relay ${room.relay}.`);
-    const lines = memberLines(room);
-    io.out(
-      lines.length
-        ? `Members:\n${lines.join("\n")}`
-        : "No members yet: share the invite (`parley invite`).",
+    const config = readConfig(paths);
+    const running = runningLaunches(paths).filter((l) => {
+      try {
+        return projectFor(paths, l.cwd)?.roomId === room.roomId;
+      } catch {
+        return false;
+      }
+    });
+    ui.heading("Room", room.name);
+    ui.fact("You", you);
+    ui.fact("Folder", tildify(room.project, paths.home));
+    ui.fact("Relay", [
+      s(hostOf(room.relay), reached ? "" : "warn"),
+      s(`  ${relayNote}`, "muted"),
+    ]);
+    ui.fact(
+      "Autonomy",
+      `${config.autonomy}${config.approvals ? ", approvals on" : ""}`,
     );
-    const on = sessionsOn(paths, readdirSafe).filter(
-      (s) => s.roomId === room.roomId,
+    ui.fact(
+      "Sessions",
+      running.length
+        ? `${running.length} \`parley\` running here`
+        : "none running here",
+      running.length ? "ok" : "muted",
     );
-    io.out(
-      on.length
-        ? `On in ${on.length} conversation${on.length === 1 ? "" : "s"}.`
-        : "Off in every conversation (type `/parley on` in one).",
+    ui.fact(
+      "Versions",
+      `you ${VERSION} ${g.dot} relay ${room.versions?.relay?.app ?? "not seen yet"}`,
     );
-    const { memberVersions, notices } = await import("./compat.js");
-    const relay = room.versions?.relay;
-    const versions = [
-      `you ${VERSION}`,
-      `relay ${relay ? (relay.app ?? "older than 0.2.0") : "not seen yet"}`,
-      ...memberVersions(room).map(
-        (m) => `${m.name} ${m.app ?? "not reported (0.1 or older)"}`,
-      ),
-    ];
-    io.out(`Parley versions: ${versions.join(", ")}.`);
-    for (const line of notices(room)) io.out(line);
+
+    const activity = memberActivity(paths, room);
+    const versions = memberVersions(room);
+    const members = Object.entries(room.members);
+    const online = activity.filter((a) => a.state !== "offline");
+    const working = online.filter((a) => a.state === "working").length;
+    ui.heading(
+      "Members",
+      members.length
+        ? `${online.length}/${activity.length} online${working ? ` ${g.dot} ${working} working` : ""}`
+        : "",
+    );
+    if (!members.length) {
+      ui.skip("Nobody else yet.");
+      ui.blank();
+      ui.next("parley invite", "and send it to them");
+    }
+    const tone = { working: "brand", idle: "ok", offline: "muted" };
+    const nameWidth = Math.max(10, ...members.map(([, m]) => m.name.length));
+    for (const [id, m] of members) {
+      const seen = activity.find((a) => a.id === id);
+      const app = versions.find((v) => v.name === m.name)?.app;
+      const state =
+        m.status === "approved" ? (seen?.state ?? "offline") : m.status;
+      const shade = m.status === "approved" ? tone[state] : "warn";
+      const glyph =
+        m.status !== "approved" ? g.wait : state === "offline" ? g.off : g.live;
+      const words =
+        m.status === "approved"
+          ? seen
+            ? activityText(seen)
+            : "offline"
+          : m.status === "pending"
+            ? "waiting for approval"
+            : m.status;
+      ui.entry(
+        [s(glyph, shade)],
+        m.name,
+        [
+          s(words.padEnd(24), shade),
+          s(m.fingerprint, "muted"),
+          ...(app ? [s(`  ${app}`, "muted")] : []),
+        ],
+        nameWidth,
+      );
+    }
+
+    const claims = activeClaims(paths, room.roomId);
+    if (claims.length) {
+      ui.heading("Claims", plural(claims.length, "claim"));
+      for (const c of claims)
+        ui.lines(
+          wrapLine(
+            [s(`${g.bullet} `, "brand"), s(describeClaim(c))],
+            ui.width,
+            2,
+          ),
+        );
+    }
+    const memory = sharedMemory(paths, room.roomId);
+    if (memory.length) {
+      ui.heading("Shared memory", plural(memory.length, "topic"));
+      const topicWidth = Math.min(
+        20,
+        Math.max(...memory.slice(0, 8).map((n) => (n.topic ?? "note").length)),
+      );
+      for (const n of memory.slice(0, 8))
+        ui.entry(
+          [s(g.bullet, "brand")],
+          (n.topic ?? "note").slice(0, topicWidth),
+          [s(n.text.replace(/\s+/g, " ").slice(0, 160))],
+          topicWidth,
+        );
+      if (memory.length > 8)
+        ui.paragraph(`and ${memory.length - 8} more: parley view has them all`);
+    }
+    const lines = notices(room);
+    if (lines.length) {
+      ui.blank();
+      for (const line of lines) ui.warn(line);
+    }
     return 0;
   },
 
-  async off({ paths, io }) {
-    const { updateSession } = await import("./sessions.js");
-    const { readdirSafe, sessionsOn } = helpers;
-    const on = sessionsOn(paths, readdirSafe);
-    for (const s of on)
-      updateSession(paths, s.sessionId, (x) => (x.enabled = false));
-    io.out(
-      on.length
-        ? `Turned Parley off in ${on.length} conversation${on.length === 1 ? "" : "s"}.`
-        : "Parley was not on anywhere.",
+  // What a turn a member's message started may do here. Narrowing it to
+  // "read" is always allowed; widening it to "work" needs the person, warned.
+  async autonomy({ positionals, paths, io }) {
+    const { readConfig, writeConfig } = await import("./config.js");
+    const ui = io.ui;
+    const wanted = positionals[0]?.toLowerCase();
+    if (wanted !== undefined && wanted !== "read" && wanted !== "work")
+      throw new UsageError("parley autonomy [read|work]");
+    if (wanted === "work" && readConfig(paths).autonomy !== "work") {
+      ui.danger("members' agents will be able to change this project", [
+        "In a turn their message starts, your Claude may pull, resolve conflicts, edit project files, commit and push when they ask, with nobody watching.",
+        "Parley keeps it to the project and away from your secrets; it cannot judge whether a request is wise.",
+      ]);
+      const typed = await ask(io, "Type work to confirm:");
+      if (typed.trim().toLowerCase() !== "work") {
+        ui.blank();
+        ui.skip("Autonomy is unchanged.");
+        return 1;
+      }
+      ui.blank();
+    }
+    if (wanted) writeConfig(paths, (c) => (c.autonomy = wanted));
+    const work = readConfig(paths).autonomy === "work";
+    ui.ok(`Autonomy is ${work ? "work" : "read"}`);
+    ui.blank();
+    ui.paragraph(
+      work
+        ? "A turn a member's message starts may read, talk, and keep the project in step: pull, resolve conflicts, edit project files, commit and push."
+        : "A turn a member's message starts may read and talk; changes to the project wait until you write.",
+    );
+    ui.blank();
+    command(
+      ui,
+      work ? "Narrow it" : "Widen it",
+      work ? "parley autonomy read" : "parley autonomy work",
     );
     return 0;
   },
@@ -349,6 +611,7 @@ const COMMANDS = {
   // on their own again, so it needs the person.
   async approvals({ positionals, paths, io }) {
     const { readConfig, writeConfig } = await import("./config.js");
+    const ui = io.ui;
     const wanted = positionals[0]?.toLowerCase();
     if (wanted !== undefined && wanted !== "on" && wanted !== "off")
       throw new UsageError("parley approvals [on|off]");
@@ -356,47 +619,39 @@ const COMMANDS = {
       if (
         !(await yes(
           io,
-          "Let your agents send messages, notes and diffs without asking you (still only through Parley's checks)?",
+          "Let your agents send messages, notes and diffs without asking you?",
         ))
-      )
+      ) {
+        ui.blank();
+        ui.skip("Approvals stay on.");
         return 1;
+      }
+      ui.blank();
     }
     if (wanted) writeConfig(paths, (c) => (c.approvals = wanted === "on"));
-    io.out(
-      readConfig(paths).approvals
-        ? "Approvals are on: each message, note and diff your agent sends waits for your yes in a dialog."
-        : "Approvals are off: your agent talks to the room on its own, through Parley's checks (this project only, no secrets).",
+    const on = readConfig(paths).approvals;
+    ui.ok(`Approvals are ${on ? "on" : "off"}`);
+    ui.blank();
+    ui.paragraph(
+      on
+        ? "Each message, note and diff your agent sends waits for your yes in a dialog."
+        : "Your agent talks to the room on its own, through Parley's checks: this project only, no secrets.",
     );
-    return 0;
-  },
-
-  async install({ values, paths, io, env }) {
-    const { installedEntry, isCurrent, install, serverEntry } =
-      await import("./install.js");
-    const wanted = serverEntry({ cliPath: CLI_PATH });
-    const current = installedEntry({ env, home: paths.home });
-    if (values["dry-run"]) {
-      io.out(
-        isCurrent(current, wanted)
-          ? "Parley's MCP server is already in Claude Code's user configuration; nothing to do."
-          : `Would run: claude mcp add-json --scope user parley '${JSON.stringify(wanted)}'`,
-      );
-      return 0;
-    }
-    const { action } = install({ env, home: paths.home, cliPath: CLI_PATH });
-    io.out(
-      action === "same"
-        ? "Parley is installed already."
-        : `${action === "add" ? "Added" : "Updated"} Parley's MCP server in Claude Code's user configuration (claude mcp list shows it). It does nothing outside a \`parley\` launch; \`parley uninstall\` removes it.`,
+    ui.blank();
+    command(
+      ui,
+      on ? "Turn off" : "Turn on",
+      on ? "parley approvals off" : "parley approvals on",
     );
     return 0;
   },
 
   // Parley updates the way it was installed: a git checkout, pulled
   // (fast-forward only) and its dependencies installed again.
-  async update({ paths, io, env }) {
+  async update({ io, env, paths }) {
     const { spawnSync } = await import("node:child_process");
     const { dirname } = await import("node:path");
+    const ui = io.ui;
     const repo = dirname(dirname(CLI_PATH));
     const git = (...args) =>
       spawnSync("git", ["-C", repo, ...args], {
@@ -413,13 +668,17 @@ const COMMANDS = {
       );
     const remote =
       git("remote", "get-url", "origin").stdout?.trim() || "origin";
-    if (
-      !(await yes(
-        io,
-        `Update Parley ${VERSION} in ${repo} from ${remote} (git pull --ff-only, then npm install)?`,
-      ))
-    )
+    ui.heading("Update", `version ${VERSION}`);
+    ui.fact("Folder", tildify(repo, paths.home));
+    ui.fact("From", remote);
+    ui.fact("Steps", "git pull --ff-only, then npm install");
+    ui.blank();
+    if (!(await yes(io, "Update Parley?"))) {
+      ui.blank();
+      ui.skip("Not updated.");
       return 1;
+    }
+    ui.blank();
     const run = (command, args) =>
       spawnSync(command, args, {
         cwd: repo,
@@ -438,67 +697,119 @@ const COMMANDS = {
       encoding: "utf8",
       env,
     }).stdout?.trim();
-    io.out(
-      after && after !== VERSION
-        ? `Updated Parley ${VERSION} to ${after}. Restart running \`parley\` sessions to use it.`
-        : `Parley ${VERSION} is the newest on ${remote}.`,
-    );
-    const { installedEntry } = await import("./install.js");
-    if (installedEntry({ env, home: paths.home }))
-      spawnSync(process.execPath, [CLI_PATH, "install"], {
-        stdio: "inherit",
-        env,
-      });
-    return 0;
-  },
-
-  async uninstall({ paths, io, env }) {
-    const { uninstall } = await import("./install.js");
-    const { action } = uninstall({ env, home: paths.home });
-    io.out(
-      action === "remove"
-        ? "Removed Parley's MCP server from Claude Code's user configuration. Your keys and rooms stay in ~/.parley."
-        : "Parley was not installed.",
-    );
+    ui.blank();
+    if (after && after !== VERSION) {
+      ui.ok(`Updated Parley ${VERSION} to ${after}`);
+      ui.blank();
+      ui.paragraph("Restart running `parley` sessions to use it.");
+    } else ui.ok(`Parley ${VERSION} is the newest`, `on ${remote}`);
     return 0;
   },
 
   async log({ values, paths, io, cwd }) {
-    const { readLog } = await import("./rooms.js");
+    const { readLog, loadIdentity } = await import("./rooms.js");
+    const { lineFor } = await import("./hooks.js");
     const room = await hereRoom(paths, cwd);
-    const { cleanLine, clean } = await import("./inbound.js");
+    const ui = io.ui;
     const count = Math.max(1, Math.min(500, Number(values.count ?? 20) || 20));
-    for (const e of readLog(paths, room.roomId).slice(-count)) {
-      const when = new Date(e.at).toISOString().replace("T", " ").slice(0, 16);
-      const who = e.own ? "you" : cleanLine(e.name);
-      const what =
-        e.kind === "diff"
-          ? `diff ${e.id}: ${(e.files ?? []).length} files${e.note ? ` (${cleanLine(e.note, 120)})` : ""}`
-          : clean(e.text, 2000);
-      io.out(
-        `${when}  ${who} ${e.kind === "message" ? "" : `[${e.kind}] `}${what}`,
+    // What the relay has that this computer has not seen yet, first.
+    let unreached = null;
+    const identity = loadIdentity(paths);
+    if (identity && !values.offline) {
+      const { syncRoom } = await import("./ops.js");
+      try {
+        await syncRoom(paths, identity, room);
+      } catch (error) {
+        unreached = error.message;
+      }
+    }
+    const shown = readLog(paths, room.roomId)
+      .slice(-count)
+      .map((e) => [e, lineFor(e, room, ui.term.g)])
+      .filter(([, line]) => line);
+    if (unreached)
+      ui.warn(
+        `The relay did not answer (${unreached}); this is what this computer has.`,
+      );
+    ui.heading("Log", `room "${room.name}", the last ${count}`);
+    if (!shown.length) ui.skip("Nothing yet.");
+    // The same lines a session shows, with when.
+    for (const [e, line] of shown) {
+      const at = new Date(e.at);
+      const stamp = `${at.toLocaleDateString([], { month: "short", day: "2-digit" })} ${at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+      ui.lines(
+        wrapLine(
+          [
+            s(`${stamp}  `, "muted"),
+            s(
+              line.slice(`${ui.term.g.mark} Parley `.length),
+              e.own ? "me" : "",
+            ),
+          ],
+          ui.width,
+          stamp.length + 2,
+        ),
       );
     }
     return 0;
   },
 
-  async leave({ paths, io, cwd }) {
-    const { leaveRoom } = await import("./ops.js");
+  // A message from the person themselves, not their agent: the others' agents
+  // see it as such.
+  async say({ positionals, values, paths, io, cwd, env }) {
+    const identity = await needIdentity(paths);
+    needPerson(io);
+    const text = positionals.join(" ").trim();
+    if (!text) throw new UsageError('parley say "message" [--to name]');
     const room = await hereRoom(paths, cwd);
-    if (
-      !(await yes(
-        io,
-        `Leave room "${room.name}" and delete its keys and messages from this computer?`,
-      ))
-    )
-      return 1;
-    leaveRoom(paths, room);
-    io.out(`Left "${room.name}".`);
+    const { sayAsPerson } = await import("./view.js");
+    const sent = await sayAsPerson({
+      paths,
+      identity,
+      room,
+      text,
+      to: values.to ? [values.to] : [],
+      env,
+    });
+    io.ui.ok(sent.replace(/\.$/, ""), "as you, not your agent");
     return 0;
   },
 
-  async relay({ values, io, env }) {
+  async view({ paths, io, cwd, env }) {
+    const identity = await needIdentity(paths);
+    needPerson(io);
+    const room = await hereRoom(paths, cwd);
+    const { runView } = await import("./view.js");
+    return runView({ paths, identity, room, env });
+  },
+
+  async leave({ paths, io, cwd }) {
+    const { leaveRoom } = await import("./ops.js");
+    const ui = io.ui;
+    const room = await hereRoom(paths, cwd);
+    ui.heading("Leave", `room "${room.name}"`);
+    ui.fact("Folder", tildify(room.project, paths.home));
+    ui.fact("Members", String(Object.keys(room.members).length));
+    ui.blank();
+    if (
+      !(await yes(
+        io,
+        `Leave "${room.name}" and delete its keys and messages from this computer?`,
+      ))
+    ) {
+      ui.blank();
+      ui.skip(`Still in "${room.name}".`);
+      return 1;
+    }
+    leaveRoom(paths, room);
+    ui.blank();
+    ui.ok(`Left "${room.name}"`, "its keys and messages are gone from here");
+    return 0;
+  },
+
+  async relay({ values, io, env, paths }) {
     const { startRelay, RELAY_DEFAULTS } = await import("./relay/server.js");
+    const ui = io.ui;
     const host = values.host ?? env.PARLEY_RELAY_HOST ?? RELAY_DEFAULTS.host;
     const port = Number(
       values.port ?? env.PARLEY_RELAY_PORT ?? RELAY_DEFAULTS.port,
@@ -506,31 +817,51 @@ const COMMANDS = {
     const relayKey = env.PARLEY_RELAY_KEY ?? "";
     const tlsCert = values["tls-cert"] ?? env.PARLEY_RELAY_TLS_CERT ?? null;
     const tlsKey = values["tls-key"] ?? env.PARLEY_RELAY_TLS_KEY ?? null;
+    const data = values.data ?? env.PARLEY_RELAY_DATA ?? RELAY_DEFAULTS.data;
+    const maxRooms = Number(
+      values["max-rooms"] ??
+        env.PARLEY_RELAY_MAX_ROOMS ??
+        RELAY_DEFAULTS.maxRooms,
+    );
     const relay = await startRelay({
       host,
       port,
-      data: values.data ?? env.PARLEY_RELAY_DATA ?? RELAY_DEFAULTS.data,
+      data,
       relayKey,
       tlsCert,
       tlsKey,
-      maxRooms: Number(
-        values["max-rooms"] ??
-          env.PARLEY_RELAY_MAX_ROOMS ??
-          RELAY_DEFAULTS.maxRooms,
-      ),
+      maxRooms,
       log: (line) => io.err(line),
     });
-    io.out(
-      `Parley relay listening on ${relay.tls ? "wss" : "ws"}://${host}:${relay.port}`,
+    ui.heading("Relay", `version ${VERSION}`);
+    ui.ok(`Listening on ${relay.tls ? "wss" : "ws"}://${host}:${relay.port}`);
+    ui.blank();
+    ui.fact(
+      "Data",
+      data === ":memory:" ? "in memory only" : tildify(data, paths.home),
     );
+    ui.fact("Rooms", `at most ${maxRooms}`);
+    ui.fact(
+      "Relay key",
+      relayKey ? "set: only those who have it open rooms" : "none",
+      relayKey ? "" : "warn",
+    );
+    if (
+      !relayKey ||
+      (!relay.tls && !["127.0.0.1", "localhost", "::1"].includes(host))
+    )
+      ui.blank();
     if (!relayKey)
-      io.out(
-        "No PARLEY_RELAY_KEY is set, so anyone who can reach this relay can open rooms on it.",
+      ui.warn(
+        "Without PARLEY_RELAY_KEY, anyone who can reach this relay can open rooms on it.",
       );
     if (!relay.tls && !["127.0.0.1", "localhost", "::1"].includes(host))
-      io.out(
+      ui.warn(
         "No TLS here: put it behind TLS (Caddy, `tailscale serve`) or use it on a tailnet. Parley clients refuse ws:// anywhere else.",
       );
+    ui.blank();
+    ui.paragraph("Ctrl+C stops it. What it does is logged below.");
+    ui.end();
     await new Promise((resolve) => {
       const stop = () => relay.close().then(resolve);
       process.once("SIGINT", stop);
@@ -543,16 +874,16 @@ const COMMANDS = {
     const { loadIdentity, projectFor, loadRoom } = await import("./rooms.js");
     const { resolveClaude } = await import("./claude-path.js");
     const { spawnSync } = await import("node:child_process");
-    let problems = 0;
-    const check = (ok, text, fix = "") => {
-      io.out(`${ok ? "ok  " : "FIX "} ${text}${!ok && fix ? `: ${fix}` : ""}`);
-      if (!ok) problems++;
-    };
+    const ui = io.ui;
+    const checks = [];
+    const check = (state, name, detail) => checks.push({ state, name, detail });
     const major = Number(process.versions.node.split(".")[0]);
     check(
-      major >= 24,
-      `Node ${process.versions.node}`,
-      "Parley needs Node 24 or newer",
+      major >= 24 ? "done" : "fail",
+      "Node",
+      major >= 24
+        ? process.versions.node
+        : `${process.versions.node}: Parley needs Node 24 or newer`,
     );
     try {
       const claude = resolveClaude({ env, home: paths.home });
@@ -561,105 +892,135 @@ const COMMANDS = {
         windowsHide: true,
       });
       check(
-        out.status === 0,
-        `Claude Code ${out.stdout?.trim() ?? ""}`,
-        "claude --version failed",
+        out.status === 0 ? "done" : "fail",
+        "Claude Code",
+        out.status === 0 ? out.stdout.trim() : "claude --version failed",
       );
     } catch (error) {
-      check(false, "Claude Code", error.message);
+      check("fail", "Claude Code", error.message);
     }
-    check(Boolean(loadIdentity(paths)), "Your keys", "run `parley setup`");
-    {
-      const { installedEntry, isCurrent, serverEntry } =
-        await import("./install.js");
-      const entry = installedEntry({ env, home: paths.home });
+    const identity = loadIdentity(paths);
+    check(
+      identity ? "done" : "fail",
+      "Your keys",
+      identity
+        ? `${identity.name}, ${await fingerprintOf(identity)}`
+        : "run parley setup",
+    );
+    if (process.platform === "win32") {
+      const { statusLineShell } = await import("./statusline.js");
+      const bash = /bash\.exe$/i.test(statusLineShell(env).command);
       check(
-        isCurrent(entry, serverEntry({ cliPath: CLI_PATH })),
-        "Installed, so messages can wake a session",
-        entry
-          ? "it points at another copy of Parley; run `parley install` again"
-          : "run `parley install`",
+        bash ? "done" : "fail",
+        "Git Bash",
+        bash
+          ? "for Claude Code's Monitor tool, Parley's message watch"
+          : "install Git for Windows: the message watch needs it",
       );
     }
     const project = projectFor(paths, cwd);
     const room = project && loadRoom(paths, project.roomId);
     check(
-      Boolean(room),
-      "This folder is in a room",
-      "`parley create` or `parley join <invite>`",
+      room ? "done" : "fail",
+      "Room",
+      room
+        ? `"${room.name}", ${tildify(room.project, paths.home)}`
+        : "this folder is not in one: parley create, or parley join <invite>",
     );
-    if (room && loadIdentity(paths)) {
+    const notes = [];
+    if (room && identity) {
       const { syncRoom } = await import("./ops.js");
       const { notices } = await import("./compat.js");
       try {
-        const fresh = await syncRoom(paths, loadIdentity(paths), room);
-        check(true, `Relay ${room.relay}`);
-        for (const line of notices(fresh)) io.out(`note ${line}`);
+        const fresh = await syncRoom(paths, identity, room);
+        check("done", "Relay", hostOf(room.relay));
+        notes.push(...notices(fresh));
       } catch (error) {
-        check(false, `Relay ${room.relay}`, error.message);
+        check("fail", "Relay", `${hostOf(room.relay)}: ${error.message}`);
       }
     }
     if (process.platform === "win32")
-      io.out(
-        "note Claude Code does not sandbox commands on native Windows: keep Parley sessions out of bypass mode (Parley refuses it) and review what you approve.",
+      check(
+        "warn",
+        "Sandbox",
+        "Claude Code does not sandbox commands on native Windows: keep Parley sessions out of bypass mode (Parley refuses it) and review what you approve.",
       );
-    return problems ? 1 : 0;
+    for (const note of notes) check("warn", "Versions", note);
+    const marksFor = {
+      done: [s(ui.term.g.check, "ok bold")],
+      fail: [s(ui.term.g.cross, "err bold")],
+      warn: [s(ui.term.g.warn, "warn bold")],
+    };
+    const nameWidth = Math.max(...checks.map((c) => c.name.length));
+    ui.heading("Doctor", `version ${VERSION}`);
+    for (const c of checks)
+      ui.entry(
+        marksFor[c.state],
+        c.name,
+        [s(c.detail, c.state === "fail" ? "" : "muted")],
+        nameWidth,
+      );
+    const failed = checks.filter((c) => c.state === "fail").length;
+    const warned = checks.filter((c) => c.state === "warn").length;
+    ui.blank();
+    if (failed) ui.err(`${plural(failed, "check")} failed.`);
+    else
+      ui.ok(
+        warned
+          ? `All checks passed; ${plural(warned, "note")} above.`
+          : "All checks passed.",
+      );
+    return failed ? 1 : 0;
   },
 
   // ---- Claude Code's callers ----------------------------------------------
 
   async hook({ positionals, values, paths, io }) {
-    const input = parseJson(readStdin());
     try {
       const { handleHook } = await import("./hooks.js");
-      const output = handleHook(positionals[0], input, {
+      const output = handleHook(positionals[0], parseJson(readStdin()), {
         paths,
         launchId: values.launch ?? null,
       });
       if (output) io.out(JSON.stringify(output));
-    } catch (error) {
-      // A hook never fails the session, but a toggle that went wrong still
-      // stays away from the model.
-      if (
-        positionals[0] === "user-prompt" &&
-        /^\s*\/?parley\s+(on|off|status)\b/i.test(input?.prompt ?? "")
-      )
-        io.out(
-          JSON.stringify({
-            decision: "block",
-            reason: `Parley could not do that: ${error?.message ?? error}`,
-          }),
-        );
+    } catch {
+      // A hook never fails the session.
     }
     return 0;
   },
 
+  async watch({ values, paths }) {
+    const { runWatch } = await import("./watch.js");
+    return runWatch({ paths, launchId: values.launch ?? null });
+  },
+
+  async statusline({ values, paths, env }) {
+    const { statusLine } = await import("./statusline.js");
+    const { readLaunch } = await import("./sessions.js");
+    const stdinText = readStdin();
+    let out = "";
+    try {
+      out = statusLine({
+        launch: values.launch ? readLaunch(paths, values.launch) : null,
+        stdinText,
+        env,
+      });
+    } catch {
+      // A status line never fails the session.
+    }
+    process.stdout.write(out);
+    return 0;
+  },
+
   async mcp({ values, paths, env }) {
+    if (!values.launch)
+      throw new UsageError(
+        "parley mcp --launch <id> (a `parley` launch runs it)",
+      );
     const { runMcp } = await import("./mcp.js");
-    runMcp({
-      paths,
-      // The launch passes its id on the command line (--mcp-config) or, to
-      // the installed server, in the environment.
-      launchId: values.launch ?? env.PARLEY_LAUNCH ?? null,
-      env: { ...env, PARLEY_VERSION: version() },
-    });
+    runMcp({ paths, launchId: values.launch, env });
     return new Promise(() => {});
   },
-};
-
-const helpers = {
-  readdirSafe: (dir) => {
-    try {
-      return readdirSync(dir);
-    } catch {
-      return [];
-    }
-  },
-  sessionsOn: (paths, readdirSafe) =>
-    readdirSafe(paths.sessions)
-      .filter((f) => f.endsWith(".json"))
-      .map((f) => parseJson(readFileSync(`${paths.sessions}/${f}`, "utf8")))
-      .filter((s) => s?.enabled),
 };
 
 const OPTIONS = {
@@ -671,8 +1032,8 @@ const OPTIONS = {
   },
   join: { "relay-key": { type: "string" } },
   status: { offline: { type: "boolean" } },
-  log: { count: { type: "string", short: "n" } },
-  install: { "dry-run": { type: "boolean" } },
+  log: { count: { type: "string", short: "n" }, offline: { type: "boolean" } },
+  say: { to: { type: "string" } },
   relay: {
     host: { type: "string" },
     port: { type: "string" },
@@ -683,42 +1044,96 @@ const OPTIONS = {
   },
   hook: { launch: { type: "string" } },
   mcp: { launch: { type: "string" } },
+  watch: { launch: { type: "string" } },
+  statusline: { launch: { type: "string" } },
 };
 
-const HELP = `parley ${version()}: keep each other's agents in the loop.
+const HELP = [
+  [
+    "Start",
+    "",
+    [
+      ["parley [claude arguments]", "Claude Code with Parley on"],
+      ["parley start [arguments]", "the same, starting with a prompt"],
+      ["parley view", "the room, live, in a terminal of its own"],
+      ['parley say "text" [--to name]', "a message from you, not your agent"],
+    ],
+  ],
+  [
+    "Set up",
+    "each needs you at a terminal",
+    [
+      ["parley setup [--name N]", "your keys and the name members see"],
+      ["parley create --relay URL", "open a room for this project"],
+      ["parley join <invite>", "join a room from an invite"],
+      ["parley approve [who]", "let someone in, after comparing fingerprints"],
+      ["parley block <who>", "stop writing to and reading from a member"],
+      ["parley invite", "print this room's invite again"],
+      ["parley leave", "take this folder out of its room"],
+    ],
+  ],
+  [
+    "Everyday",
+    "",
+    [
+      ["parley status", "the room, its members, claims and memory"],
+      ["parley log [-n 20]", "the room's latest messages, notes, files"],
+      [
+        "parley autonomy [read|work]",
+        "what a turn a member's message starts may do",
+      ],
+      [
+        "parley approvals [on|off]",
+        "approve each send yourself (off by default)",
+      ],
+      ["parley doctor", "check the setup"],
+      ["parley update", "update Parley (git pull, npm install)"],
+    ],
+  ],
+  [
+    "Host a relay",
+    "",
+    [
+      [
+        "parley relay [--port P]",
+        "host a relay (PARLEY_RELAY_KEY: who opens rooms)",
+      ],
+    ],
+  ],
+];
 
-Start
-  parley [claude arguments]   Claude Code with Parley loaded; type \`/parley on\` in a conversation
-  parley start [arguments]    the same, for arguments that look like a command ("parley start fix it")
-
-Set up (each needs you at a terminal)
-  parley install              let Claude Code wake a session for new messages (once)
-  parley setup [--name N]     your keys and the name members see
-  parley create --relay URL   open a room for this project and print its invite
-  parley join <invite>        join a room from an invite
-  parley approve [who]        let in someone who joined, after comparing fingerprints
-  parley block <who>          stop writing to and reading from a member
-  parley invite               print this room's invite again
-  parley leave                take this folder out of its room
-  parley uninstall            undo parley install
-
-Everyday
-  parley status               you, this folder's room, its members, where Parley is on
-  parley log [-n 20]          the latest messages, notes and diffs
-  parley off                  turn Parley off in every conversation
-  parley approvals [on|off]   ask you before each message, note and diff your agent sends (off by default)
-  parley doctor               check the setup
-  parley update               update Parley (git pull, npm install)
-
-Host a relay
-  parley relay [--host H] [--port P] [--data FILE] [--tls-cert C --tls-key K]
-                              PARLEY_RELAY_KEY limits who can open rooms
-
-In a conversation: \`/parley on\`, \`/parley off\`, \`/parley status\`.`;
+function printHelp(ui) {
+  ui.full();
+  ui.lines(
+    wrapLine(
+      [
+        s("parley", "accent bold"),
+        s(
+          ` on its own starts Claude Code with Parley on, in a folder that is in a room. Version ${VERSION}.`,
+          "muted",
+        ),
+      ],
+      ui.width,
+    ),
+  );
+  const nameWidth =
+    Math.max(...HELP.flatMap(([, , rows]) => rows.map(([c]) => c.length))) + 3;
+  for (const [section, note, rows] of HELP) {
+    ui.heading(section, note);
+    for (const [command, what] of rows)
+      ui.lines(
+        wrapLine(
+          [s(command.padEnd(nameWidth), "accent bold"), s(what)],
+          ui.width,
+          nameWidth,
+        ),
+      );
+  }
+}
 
 export async function main(
   argv = process.argv.slice(2),
-  { env = process.env, cwd = process.cwd(), io = defaultIo() } = {},
+  { env = process.env, cwd = process.cwd(), io = defaultIo(env) } = {},
 ) {
   const paths = pathsFor(env);
   const [first, ...rest] = argv;
@@ -727,7 +1142,7 @@ export async function main(
     return 0;
   }
   if (first === "help" || first === "--help" || first === "-h") {
-    io.out(HELP);
+    printHelp(io.ui);
     return 0;
   }
   if (first === undefined || first === "start" || first.startsWith("-")) {
@@ -738,12 +1153,13 @@ export async function main(
       cwd,
       env,
       cliPath: CLI_PATH,
+      ui: io.errUi,
     });
   }
-  const command = COMMANDS[first];
-  if (!command)
+  const run = COMMANDS[first];
+  if (!run)
     throw new UsageError(
-      `Unknown command "${first}". \`parley help\` lists them; \`parley start ...\` passes arguments to claude.`,
+      `Unknown command "${first}". \`parley start ...\` passes arguments to claude.`,
     );
   const { values, positionals } = parseArgs({
     args: rest,
@@ -751,13 +1167,18 @@ export async function main(
     allowPositionals: true,
     strict: true,
   });
-  return command({ values, positionals, paths, io, cwd, env });
+  return run({ values, positionals, paths, io, cwd, env });
 }
 
-function defaultIo() {
+export function defaultIo(env = process.env) {
+  // One document between stdout and stderr: the same terminal.
+  const shared = {};
   return {
     stdin: process.stdin,
     stdout: process.stdout,
+    env,
+    ui: printer(process.stdout, env, shared),
+    errUi: printer(process.stderr, env, shared),
     out: (line) => process.stdout.write(`${line}\n`),
     err: (line) => process.stderr.write(`${line}\n`),
   };
@@ -774,26 +1195,31 @@ const PLAIN_ERRORS = new Set([
   "CryptoError",
   "LaunchRefused",
   "ClaudeNotFound",
-  "InstallError",
 ]);
 const isUsage = (error) =>
   error instanceof UsageError ||
   String(error?.code ?? "").startsWith("ERR_PARSE_ARGS");
 
+export function reportError(io, error) {
+  const plain = PLAIN_ERRORS.has(error?.constructor?.name) || isUsage(error);
+  if (plain)
+    io.errUi.failure(error.message, isUsage(error) ? "parley help" : null);
+  else process.stderr.write(`parley: ${error?.stack ?? error}\n`);
+  io.errUi.end();
+  return isUsage(error) ? 2 : 1;
+}
+
 const same = (a, b) =>
   process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
 if (process.argv[1] && same(CLI_PATH, realpathSync(process.argv[1]))) {
-  main().then(
+  const io = defaultIo(process.env);
+  main(process.argv.slice(2), { io }).then(
     (code) => {
+      io.ui.end();
       process.exitCode = code ?? 0;
     },
     (error) => {
-      const plain =
-        PLAIN_ERRORS.has(error?.constructor?.name) || isUsage(error);
-      process.stderr.write(
-        `parley: ${plain ? error.message : (error?.stack ?? error)}\n`,
-      );
-      process.exitCode = isUsage(error) ? 2 : 1;
+      process.exitCode = reportError(io, error);
     },
   );
 }

@@ -59,7 +59,17 @@ export function repo(dir, files = { "README.md": "hello\n" }) {
 // A clone of `source` (a person's own copy of the same project).
 export function cloneOf(source, dir, ...flags) {
   mkdirSync(dirname(dir), { recursive: true });
-  git(dirname(dir), "clone", "-q", ...flags, source, dir);
+  // Checked out without line-ending conversion, as the source was made.
+  git(
+    dirname(dir),
+    "clone",
+    "-q",
+    "-c",
+    "core.autocrlf=false",
+    ...flags,
+    source,
+    dir,
+  );
   git(dir, "config", "core.autocrlf", "false");
   return dir;
 }

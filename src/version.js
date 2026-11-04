@@ -5,8 +5,7 @@
 //   WIRE      client <-> relay frames (relay/core.js). A client says hello
 //             with the highest version it speaks and the lowest it still
 //             can; the relay answers with the one both speak, or refuses
-//             and says which side is behind. Relays from before 0.2 accept
-//             only v 1 and say nothing about themselves.
+//             and says which side is behind.
 //   ENVELOPE  member <-> member envelopes (crypto.js). Members announce
 //             their range in a presence message; a sender writes the
 //             highest version every recipient reads.
@@ -17,7 +16,7 @@
 // and its min only when that version can no longer be supported. Keep
 // VERSION equal to package.json's (a test checks).
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.4.0";
 export const WIRE = { min: 1, max: 1 };
 export const ENVELOPE = { min: 1, max: 1 };
 

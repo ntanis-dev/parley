@@ -162,3 +162,33 @@ test("the client reconnects and picks up where it left off", async (t) => {
   await until(() => conn.state === "waiting");
   await assert.rejects(conn.post("lost"), /Not connected/);
 });
+
+test("pulses reach who is connected now, and are not kept", async (t) => {
+  const { room } = await relayFor(t);
+  const { roomId } = roomKeys(newRoomSecret());
+  const tk = token();
+  const a = await socket(room(roomId));
+  a.send({ t: "hello", v: 1, token: tk, after: 0 });
+  assert.deepEqual((await a.next("ready")).relay.features, ["pulse"]);
+  const b = await socket(room(roomId));
+  b.send({ t: "hello", v: 1, token: tk, after: 0 });
+  await b.next("synced");
+  a.send({ t: "pulse", blob: "abc" });
+  assert.equal((await b.next("pulse")).blob, "abc");
+  // Nothing of it in the backlog of someone connecting later.
+  const c = await socket(room(roomId));
+  c.send({ t: "hello", v: 1, token: tk, after: 0 });
+  assert.equal((await c.next("ready")).cursor, 0);
+  await c.next("synced");
+  assert.equal(
+    c.frames.some((f) => f.t === "msg" || f.t === "pulse"),
+    false,
+  );
+  // A flood is cut off quietly.
+  for (let i = 0; i < 20; i++) a.send({ t: "pulse", blob: `p${i}` });
+  await new Promise((r) => setTimeout(r, 300));
+  assert.ok(
+    b.frames.filter((f) => f.t === "pulse").length <= LIMITS.pulses.burst + 1,
+  );
+  for (const s of [a, b, c]) s.close();
+});

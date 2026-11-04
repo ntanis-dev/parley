@@ -65,6 +65,7 @@ export class RoomConnection {
     onMessage,
     onState = () => {},
     onSynced = () => {},
+    onPulse = () => {},
     WebSocketImpl = globalThis.WebSocket,
   }) {
     this.url = `${relayUrl(relay)}/v1/rooms/${roomId}`;
@@ -74,10 +75,10 @@ export class RoomConnection {
     this.onMessage = onMessage;
     this.onState = onState;
     this.onSynced = onSynced;
+    this.onPulse = onPulse;
     this.WebSocket = WebSocketImpl;
     this.pending = new Map();
     this.state = "idle";
-    this.helloV = WIRE.max;
     this.relay = null;
     this.attempt = 0;
     this.stopped = false;
@@ -124,7 +125,7 @@ export class RoomConnection {
       ws.send(
         JSON.stringify({
           t: "hello",
-          v: this.helloV,
+          v: WIRE.max,
           vmin: WIRE.min,
           app: VERSION,
           token: this.token,
@@ -167,11 +168,16 @@ export class RoomConnection {
     switch (frame?.t) {
       case "ready":
         this.attempt = 0;
-        // A relay from before 0.2 says nothing about itself.
         this.relay =
           frame.relay && typeof frame.relay.app === "string"
-            ? { app: frame.relay.app, wire: frame.relay.wire ?? null }
-            : { app: null, wire: { min: 1, max: 1 } };
+            ? {
+                app: frame.relay.app,
+                wire: frame.relay.wire ?? null,
+                features: Array.isArray(frame.relay.features)
+                  ? frame.relay.features
+                  : [],
+              }
+            : null;
         this.wire = Number.isSafeInteger(frame.wire) ? frame.wire : 1;
         this.setState("connected", {
           created: Boolean(frame.created),
@@ -185,6 +191,9 @@ export class RoomConnection {
           if (frame.c > this.cursor) this.cursor = frame.c;
           this.onMessage({ c: frame.c, at: frame.at, blob: frame.blob });
         }
+        return;
+      case "pulse":
+        if (typeof frame.blob === "string") this.onPulse(frame.blob);
         return;
       case "synced":
         if (frame.more) this.send({ t: "sync", after: this.cursor });
@@ -211,14 +220,6 @@ export class RoomConnection {
           clearTimeout(waiting.timer);
           this.pending.delete(frame.id);
           waiting.reject(error);
-        } else if (frame.code === "bad-hello" && this.helloV > WIRE.min) {
-          // A relay from before 0.2 knows only v 1: say hello again with
-          // the oldest version this client still speaks, right away.
-          this.helloV = WIRE.min;
-          this.attempt = 0;
-          try {
-            this.ws?.close(1000, "retry");
-          } catch {}
         } else if (FATAL.has(frame.code)) {
           if (frame.code === "version" && frame.relay)
             this.relay = { app: frame.relay.app, wire: frame.relay.wire };
@@ -233,6 +234,17 @@ export class RoomConnection {
     if (this.ws?.readyState !== 1) return false;
     this.ws.send(JSON.stringify(frame));
     return true;
+  }
+
+  // Whether the relay carries pulses (activity.js); older relays do not.
+  get pulses() {
+    return Boolean(this.relay?.features?.includes?.("pulse"));
+  }
+
+  pulse(blob) {
+    return this.state === "connected" && this.pulses
+      ? this.send({ t: "pulse", blob })
+      : false;
   }
 
   post(blob, timeoutMs = 20_000) {

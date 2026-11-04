@@ -222,8 +222,8 @@ export async function joinRoom({
 
 // Reads what the relay holds, so knocks that came in while no session was
 // on show up. Returns the fresh room.
-export async function syncRoom(paths, identity, room) {
-  await withRoom(paths, identity, room);
+export async function syncRoom(paths, identity, room, options) {
+  await withRoom(paths, identity, room, undefined, options);
   return loadRoom(paths, room.roomId);
 }
 

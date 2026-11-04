@@ -153,6 +153,7 @@ export function startRelay({
     ws.on("error", () => {});
   }
 
+  let closing = null;
   return new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, host, () => {
@@ -162,15 +163,16 @@ export function startRelay({
         port: address.port,
         host,
         tls: Boolean(tlsCert && tlsKey),
+        // Closing twice is fine: the second waits for the first.
         close: () =>
-          new Promise((done) => {
+          (closing ??= new Promise((done) => {
             for (const ws of wss.clients) ws.terminate();
             wss.close();
             server.close(() => {
               sql.db.close();
               done();
             });
-          }),
+          })),
       });
     });
   });

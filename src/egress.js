@@ -1,14 +1,25 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { clean } from "./inbound.js";
 
 // The way out. Everything Parley sends leaves through here, and nothing here
@@ -482,4 +493,66 @@ export function outgoingDiff(root, { paths, scratch }) {
       `Not shared: the diff looks like it holds a secret (${describe(findings, (f) => `${f.file}:${f.line}`)}). Move it out of the code, or list that file in .parleyignore.`,
     );
   return diff;
+}
+
+// ---- Files ------------------------------------------------------------------------
+
+// A file travels as base64 in a sealed envelope, sealed again: about 2.4
+// times its size on the wire, which the relay's limit has to hold.
+export const FILE_MAX = 300 * 1024;
+
+// A project file that may leave, ready to send: { path, name, size, sha256,
+// data (base64) }, or a Refusal.
+export function outgoingFile(root, input) {
+  const rel = projectPath(root, input);
+  if (isIgnored(rel, ignoreRules(root)))
+    throw new Refusal(
+      `Not sent: ${rel} is a kind of file that never leaves (keys, secrets, environment files, .parleyignore).`,
+    );
+  const full = join(root, rel);
+  let stat;
+  try {
+    stat = statSync(full);
+  } catch {
+    throw new Refusal(`There is no file ${rel}.`);
+  }
+  if (!stat.isFile()) throw new Refusal(`${rel} is not a file.`);
+  if (stat.size > FILE_MAX)
+    throw new Refusal(
+      `${rel} is ${Math.round(stat.size / 1024)} KB; the limit is ${FILE_MAX / 1024} KB.`,
+    );
+  const bytes = readFileSync(full);
+  const text = bytes.toString("utf8");
+  if (!text.includes("\ufffd") && !bytes.includes(0)) {
+    const findings = findSecrets(text);
+    if (findings.length)
+      throw new Refusal(
+        `Not sent: ${rel} looks like it holds a secret (${describe(findings)}).`,
+      );
+  }
+  return {
+    path: rel,
+    name: basename(rel),
+    size: bytes.length,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    data: bytes.toString("base64"),
+  };
+}
+
+// Writes a file a member sent into the project at `input`: inside it, not
+// where the ignore rules point (.git, keys, environment files), and never
+// over an existing file unless asked. Returns the project-relative path.
+export function incomingFile(root, input, bytes, { overwrite = false } = {}) {
+  const rel = projectPath(root, input);
+  if (rel === "." || isIgnored(rel, ignoreRules(root)))
+    throw new Refusal(`Not saved: Parley does not write ${rel}.`);
+  const full = join(root, rel);
+  if (existsSync(full)) {
+    if (!statSync(full).isFile()) throw new Refusal(`${rel} is a folder.`);
+    if (!overwrite)
+      throw new Refusal(`${rel} exists; pass overwrite to replace it.`);
+  }
+  mkdirSync(dirname(full), { recursive: true });
+  writeFileSync(full, bytes);
+  return rel;
 }

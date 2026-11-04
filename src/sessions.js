@@ -1,23 +1,20 @@
+import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { readJson, writeJsonAtomic } from "./fsutil.js";
 import { ID_RE } from "./paths.js";
 
 // Conversations and launches.
 //
-// A conversation (Claude Code's session id) is where Parley is on or off. It
-// stays as it was set across `claude --resume` and `--continue`, which keep
-// the session id; a fork, /branch or /clear starts a new id, so it starts
-// off. Only the person at the keyboard turns it on: the toggle is a prompt
-// they type, read by a hook, and a model cannot submit a prompt.
+// A launch is one `parley` run of claude, and Parley is on in it. Its hooks
+// say which conversation (Claude Code's session id) it is on right now (that
+// changes with /resume and /clear), and its MCP server reads that to know
+// which conversation it serves. The launch file also holds the message watch
+// and what the status line shows.
 //
-// A launch is one `parley` run of claude. Its hooks say which conversation it
-// is on right now (that changes with /resume and /clear), and its MCP server
-// reads that to know which conversation it serves.
-//
-// The session also records whose turn it is. A turn the person started may
-// do anything the person allows. A turn a member's message started (Parley
-// woke the session) may read and draft, nothing more, until the person
-// writes again.
+// A conversation records whose turn it is. A turn the person started may do
+// anything the person allows. A turn a member's message started (Parley woke
+// the session) may read and talk through Parley, nothing more, until the
+// person writes again.
 
 export const sessionFile = (paths, id) => join(paths.sessions, `${id}.json`);
 export const launchFile = (paths, id) => join(paths.launches, `${id}.json`);
@@ -27,10 +24,7 @@ export const readSession = (paths, id) =>
 
 export function updateSession(paths, id, change) {
   if (!ID_RE.test(id ?? "")) return null;
-  const session = readJson(sessionFile(paths, id)) ?? {
-    sessionId: id,
-    enabled: false,
-  };
+  const session = readJson(sessionFile(paths, id)) ?? { sessionId: id };
   change(session);
   session.updatedAt = Date.now();
   writeJsonAtomic(sessionFile(paths, id), session);
@@ -69,8 +63,7 @@ export const WAKE_GAP_MS = 20_000;
 export const WAKES_PER_HOUR = 12;
 
 export function canWake(session, now = Date.now()) {
-  if (!session?.enabled || isBusy(session, now))
-    return { ok: false, why: "busy" };
+  if (!session || isBusy(session, now)) return { ok: false, why: "busy" };
   if (session.permissionMode === "bypassPermissions")
     return { ok: false, why: "bypass" };
   const since = Math.max(session.humanAt ?? 0, now - 60 * 60 * 1000);
@@ -92,4 +85,26 @@ export function recordWake(session, now = Date.now()) {
     ...(session.wakes ?? []).filter((t) => t > now - 60 * 60 * 1000),
     now,
   ];
+}
+
+// The `parley` launches still running (their process is alive).
+export function runningLaunches(paths) {
+  let files = [];
+  try {
+    files = readdirSync(paths.launches);
+  } catch {
+    return [];
+  }
+  return files
+    .filter((f) => f.endsWith(".json"))
+    .map((f) => readJson(join(paths.launches, f)))
+    .filter((l) => {
+      if (!l?.pid || l.endedAt || typeof l.cwd !== "string") return false;
+      try {
+        process.kill(l.pid, 0);
+        return true;
+      } catch (error) {
+        return error.code === "EPERM";
+      }
+    });
 }
